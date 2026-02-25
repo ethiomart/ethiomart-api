@@ -155,32 +155,46 @@ firebase-admin-sdk.json
 # Uploads directory (user-generated content)
 uploads/
 
-# Test scripts and temporary files
-test-*.js
-check-*.js
-check_*.js
-fix-*.js
-fix_*.js
-add-*.js
-delete-*.js
-update-*.js
-verify-*.js
-validate-*.js
-quick-*.js
-run-*.js
-checkpoint-*.js
-reset-*.js
+# Test scripts and temporary files (root level only)
+/test-*.js
+/check-*.js
+/check_*.js
+/fix-*.js
+/fix_*.js
+/add-*.js
+/delete-*.js
+/update-*.js
+/verify-*.js
+/validate-*.js
+/quick-*.js
+/run-*.js
+/checkpoint-*.js
+/reset-*.js
 
-# PowerShell and shell scripts (temporary)
-*.ps1
-*.sh
+# PowerShell and shell scripts (temporary, root level only)
+/*.ps1
+/*.sh
 
-# Documentation and test results (keep only README.md)
-*.md
+# Documentation and test results (root level only, keep only README.md)
+/*_RESULTS.md
+/*_REPORT.md
+/*_GUIDE.md
+/*_REFERENCE.md
+/*_COMPLETE.md
+/*_CHECKPOINT*.md
+/*_EXPLORATION*.md
+/*_PRESERVATION*.md
+/*_VERIFICATION*.md
+/*_TEST*.md
+/*_ENDPOINTS*.md
+/*_BUG*.md
+/*_FINAL*.md
 !README.md
 !LICENSE.md
 !CONTRIBUTING.md
 !CHANGELOG.md
+!SECURITY.md
+!CODE_OF_CONDUCT.md
 
 # Snapshots directory
 .snapshots/

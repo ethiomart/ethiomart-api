@@ -1,0 +1,1280 @@
+const chapaService = require('../services/chapaService');
+const { Order, Payment, User, OrderItem, Analytics, Seller } = require('../models');
+const sequelize = require('../config/database');
+const securityLogger = require('../utils/securityLogger');
+const paymentMetrics = require('../utils/paymentMonitoring');
+
+/**
+ * Format response helper
+ * @param {boolean} success - Success status
+ * @param {string} message - Response message
+ * @param {object} data - Response data
+ * @returns {object} - Formatted response
+ */
+function formatResponse(success, message, data = null) {
+  const response = { success, message };
+  if (data) response.data = data;
+  return response;
+}
+
+/**
+ * Initialize payment
+ * POST /api/payments/initiate
+ * Validation is handled by validatePaymentInitialization middleware
+ * Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 11.1, 11.2, 11.3, 11.4
+ * Properties: 1, 2, 3, 4, 5, 6, 44, 45, 46, 47
+ */
+async function initiatePayment(req, res) {
+  const startTime = Date.now();
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const { orderId, amount, email, firstName, lastName, phoneNumber, currency = 'ETB' } = req.body;
+    const userId = req.user?.id;
+
+    // Log payment initialization attempt
+    securityLogger.logPaymentInitialization({
+      orderId,
+      amount: amount || 'from_order',
+      currency,
+      email,
+      userId,
+      ip: req.ip
+    });
+
+    // Find order with user details
+    const order = await Order.findOne({
+      where: { id: orderId },
+      include: [{
+        model: User,
+        as: 'user',
+        attributes: ['id', 'email', 'first_name', 'last_name', 'phone']
+      }],
+      transaction
+    });
+
+    if (!order) {
+      await transaction.rollback();
+      return res.status(404).json({
+        success: false,
+        message: 'Resource not found',
+        error: `Order with ID ${orderId} not found`
+      });
+    }
+
+    // Check if user owns the order (if userId is provided)
+    if (userId && order.user_id !== userId) {
+      await transaction.rollback();
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden',
+        error: 'You do not have permission to access this order'
+      });
+    }
+
+    // Check if order is already paid (Property 28)
+    if (order.payment_status === 'paid' || order.order_status === 'completed') {
+      await transaction.rollback();
+      
+      // Log duplicate payment attempt
+      securityLogger.logDuplicatePaymentAttempt({
+        orderId: order.id,
+        reference: order.payment_reference || 'unknown',
+        existingStatus: order.payment_status,
+        ip: req.ip
+      });
+      
+      return res.status(409).json({
+        success: false,
+        message: 'Conflict',
+        error: 'Order is already paid'
+      });
+    }
+
+    // Use provided amount or order total amount
+    const paymentAmount = amount || parseFloat(order.total_amount);
+    
+    // Property 44: Positive Amount Validation (already handled by middleware)
+    // Property 45: Currency Validation (already handled by middleware)
+    // Property 46: Email Format Validation (already handled by middleware)
+    
+    // Use provided email or order user email
+    const customerEmail = email || order.user?.email;
+    const customerFirstName = firstName || order.user?.first_name || 'Customer';
+    const customerLastName = lastName || order.user?.last_name || '';
+    const customerPhone = phoneNumber || order.user?.phone;
+
+    // Property 47: Input Sanitization (handled by validation middleware)
+    
+    // Property 1: Unique Transaction Reference Generation
+    // Property 2: Payment Initialization API Call
+    // Property 3: Authorization Header Presence
+    // Initialize payment with Chapa
+    const chapaResponse = await chapaService.initializePayment(
+      orderId,
+      paymentAmount,
+      customerEmail,
+      customerFirstName,
+      customerLastName,
+      customerPhone
+    );
+
+    // Property 6: Pending Payment Record Creation
+    // Create payment record
+    const payment = await Payment.create({
+      order_id: order.id,
+      amount: paymentAmount,
+      currency: currency.toUpperCase(),
+      status: 'pending',
+      chapa_tx_ref: chapaResponse.reference,
+      payment_data: {
+        chapaResponse,
+        customerEmail,
+        customerFirstName,
+        customerLastName,
+        customerPhone
+      }
+    }, { transaction });
+
+    await transaction.commit();
+
+    // Record metrics
+    paymentMetrics.recordPaymentInitialization({
+      orderId: order.id,
+      amount: paymentAmount
+    });
+    
+    // Record response time
+    const duration = Date.now() - startTime;
+    paymentMetrics.recordResponseTime(duration, 'initialize');
+
+    // Property 4: Checkout URL Extraction
+    // Property 5: Error Message Propagation (handled in catch block)
+    res.status(200).json({
+      success: true,
+      message: 'Payment initialized successfully',
+      data: {
+        paymentUrl: chapaResponse.paymentUrl,
+        reference: chapaResponse.reference,
+        orderId: order.id,
+        amount: paymentAmount,
+        currency: currency.toUpperCase()
+      }
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Payment initialization error:', error);
+    
+    // Property 5: Error Message Propagation
+    // Handle specific error types with appropriate status codes and messages
+    // All error responses follow consistent format: {success, message, error, field (optional)}
+    
+    // Chapa API errors (502 Bad Gateway)
+    if (error.message && error.message.includes('Chapa')) {
+      return res.status(502).json({
+        success: false,
+        message: 'Payment service temporarily unavailable',
+        error: 'Unable to connect to payment gateway. Please try again in a few moments.',
+        technicalDetails: error.message,
+        retryable: true
+      });
+    }
+    
+    // Timeout errors (408 Request Timeout)
+    if (error.message && (error.message.includes('timeout') || error.message.includes('ETIMEDOUT'))) {
+      return res.status(408).json({
+        success: false,
+        message: 'Request timed out',
+        error: 'The payment request took too long. Please check your connection and try again.',
+        technicalDetails: error.message,
+        retryable: true
+      });
+    }
+    
+    // Configuration errors (503 Service Unavailable)
+    if (error.message && (error.message.includes('configuration') || error.message.includes('CHAPA_SECRET_KEY'))) {
+      return res.status(503).json({
+        success: false,
+        message: 'Payment service configuration error',
+        error: 'Payment service is temporarily unavailable. Please try again later.',
+        technicalDetails: error.message,
+        retryable: false
+      });
+    }
+    
+    // Network errors (502 Bad Gateway)
+    if (error.message && (error.message.includes('ECONNREFUSED') || error.message.includes('ENOTFOUND') || error.message.includes('network'))) {
+      return res.status(502).json({
+        success: false,
+        message: 'Network connection error',
+        error: 'Unable to connect to payment service. Please check your internet connection and try again.',
+        technicalDetails: error.message,
+        retryable: true
+      });
+    }
+    
+    // Default server error (500 Internal Server Error)
+    // Preserve error context - don't convert to generic message
+    res.status(500).json({
+      success: false,
+      message: 'Failed to initialize payment',
+      error: error.message || 'An unexpected error occurred. Please try again.',
+      technicalDetails: error.stack ? error.stack.split('\n')[0] : error.message
+    });
+  }
+}
+
+/**
+ * Handle Chapa webhook callback
+ * POST /api/payments/webhook
+ * Validation is handled by validateWebhookPayload middleware
+ * Requirements: 3.2, 3.3, 3.4, 3.5, 4.1, 11.5, 11.6
+ * Properties: 12, 13, 14, 15, 16, 48, 49
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+const handleWebhook = async (req, res) => {
+  const startTime = Date.now();
+  
+  try {
+    const payload = req.body;
+    const signature = req.headers['chapa-signature'] || req.headers['x-chapa-signature'];
+    const { tx_ref, status, amount, ref_id } = payload;
+
+    // Property 12: Callback Parameter Extraction
+    if (!tx_ref) {
+      return res.status(400).json(formatResponse(false, 'Missing transaction reference'));
+    }
+
+    // Property 48: Callback IP Validation (optional - can be implemented if Chapa provides IP whitelist)
+    // For now, we rely on signature verification
+    
+    // Verify webhook signature (Property 48 partial)
+    const isValidSignature = chapaService.verifyWebhookSignature(payload, signature);
+    
+    if (!isValidSignature && signature) {
+      console.error(`Invalid webhook signature for tx_ref: ${tx_ref}`);
+      
+      // Log invalid signature attempt
+      securityLogger.logInvalidWebhookSignature({
+        txRef: tx_ref,
+        ip: req.ip,
+        signature: signature ? 'present' : 'missing'
+      });
+      
+      return res.status(401).json(formatResponse(false, 'Invalid webhook signature'));
+    }
+
+    // Property 13: Callback Logging
+    console.log(`Webhook received at ${new Date().toISOString()}: tx_ref=${tx_ref}, status=${status}, amount=${amount}`);
+    
+    // Log webhook received
+    securityLogger.logWebhookReceived({
+      txRef: tx_ref,
+      status,
+      amount,
+      ip: req.ip,
+      signature
+    });
+
+    // Property 49: Transaction Reference Validation
+    // Find payment by Chapa reference
+    const payment = await Payment.findOne({
+      where: { chapa_tx_ref: tx_ref },
+      include: [{ 
+        model: Order, 
+        as: 'order',
+        include: [{
+          model: User,
+          as: 'user',
+          attributes: ['id', 'email', 'first_name', 'last_name']
+        }]
+      }]
+    });
+
+    if (!payment) {
+      console.error(`Payment not found for reference: ${tx_ref}`);
+      // Property 14: Callback Acknowledgment (still acknowledge even if not found)
+      return res.status(200).json(formatResponse(true, 'Webhook received but payment not found'));
+    }
+
+    // Property 49: Validate transaction is pending
+    if (payment.status !== 'pending') {
+      console.log(`Payment ${payment.id} already processed with status: ${payment.status}`);
+      // Property 14: Callback Acknowledgment
+      return res.status(200).json(formatResponse(true, 'Webhook processed - payment already completed'));
+    }
+
+    // Property 15: No Direct Order Update from Callback
+    // We log the webhook but don't trust it - we verify with Chapa API
+    console.log(`Webhook data logged for tx_ref ${tx_ref}. Triggering server-side verification...`);
+
+    // Property 16: Verification API Call on Callback
+    // Trigger verification asynchronously (don't block webhook response)
+    setImmediate(async () => {
+      try {
+        const verificationResult = await chapaService.verifyPayment(tx_ref);
+        
+        // Validate amount and currency
+        const expectedAmount = parseFloat(payment.amount);
+        const verifiedAmount = parseFloat(verificationResult.amount);
+        const expectedCurrency = payment.currency || 'ETB';
+        const verifiedCurrency = verificationResult.currency || 'ETB';
+        
+        if (Math.abs(expectedAmount - verifiedAmount) > 0.01) {
+          console.error(`Amount mismatch in webhook verification: expected ${expectedAmount}, got ${verifiedAmount}`);
+          
+          // Log amount mismatch
+          securityLogger.logAmountMismatch({
+            paymentId: payment.id,
+            reference: tx_ref,
+            expectedAmount,
+            receivedAmount: verifiedAmount
+          });
+          
+          payment.status = 'failed';
+          payment.chapa_response = { ...verificationResult, error: 'Amount mismatch' };
+          await payment.save();
+          return;
+        }
+        
+        if (expectedCurrency !== verifiedCurrency) {
+          console.error(`Currency mismatch in webhook verification: expected ${expectedCurrency}, got ${verifiedCurrency}`);
+          
+          // Log currency mismatch
+          securityLogger.logCurrencyMismatch({
+            paymentId: payment.id,
+            reference: tx_ref,
+            expectedCurrency,
+            receivedCurrency: verifiedCurrency
+          });
+          
+          payment.status = 'failed';
+          payment.chapa_response = { ...verificationResult, error: 'Currency mismatch' };
+          await payment.save();
+          return;
+        }
+        
+        // Update payment and order based on verified status
+        if (verificationResult.status === 'success') {
+          payment.status = 'success';
+          payment.payment_method = verificationResult.paymentMethod;
+          payment.transaction_id = verificationResult.transactionId;
+          payment.chapa_response = verificationResult;
+          payment.paid_at = new Date();
+          await payment.save();
+
+          const order = payment.order;
+          if (order && order.payment_status !== 'paid') {
+            order.payment_status = 'paid';
+            order.order_status = 'confirmed';
+            order.paid_at = new Date();
+            order.payment_method = verificationResult.paymentMethod;
+            await order.save();
+
+            // Record payment success metrics
+            paymentMetrics.recordPaymentSuccess({
+              paymentId: payment.id,
+              orderId: order.id,
+              amount: payment.amount,
+              paymentMethod: verificationResult.paymentMethod
+            });
+
+            // Log payment success
+            securityLogger.logPaymentSuccess({
+              paymentId: payment.id,
+              orderId: order.id,
+              reference: tx_ref,
+              amount: payment.amount,
+              currency: payment.currency,
+              paymentMethod: verificationResult.paymentMethod
+            });
+
+            // Log order confirmation
+            securityLogger.logOrderConfirmation({
+              orderId: order.id,
+              orderNumber: order.order_number,
+              paymentId: payment.id,
+              reference: tx_ref,
+              amount: payment.amount
+            });
+
+            // Send confirmation email
+            // Task 16.1.3: Implement graceful degradation for email failures
+            try {
+              const emailService = require('../services/emailService');
+              const emailResult = await emailService.sendPaymentConfirmation({
+                email: order.user?.email,
+                firstName: order.user?.first_name,
+                lastName: order.user?.last_name,
+                orderId: order.id,
+                orderNumber: order.order_number,
+                amount: payment.amount,
+                currency: payment.currency,
+                paymentMethod: verificationResult.paymentMethod,
+                reference: tx_ref
+              });
+              
+              // Log email result but don't fail payment
+              if (!emailResult.success) {
+                const logger = require('../utils/logger');
+                logger.logEmailFailure({
+                  emailType: 'payment_confirmation',
+                  recipient: order.user?.email,
+                  error: emailResult.error,
+                  orderId: order.id,
+                  paymentId: payment.id
+                });
+              }
+            } catch (emailError) {
+              // Task 16.1.3: Graceful degradation - log error but don't fail payment
+              const logger = require('../utils/logger');
+              logger.logEmailFailure({
+                emailType: 'payment_confirmation',
+                recipient: order.user?.email,
+                error: emailError.message,
+                orderId: order.id,
+                paymentId: payment.id
+              });
+              
+              console.error('Failed to send confirmation email from webhook:', emailError.message);
+            }
+          }
+
+            // Update seller analytics for this order
+            try {
+              const orderItems = await OrderItem.findAll({ where: { orderId: order.id } });
+              for (const item of orderItems) {
+                if (item.sellerId) {
+                  const revenue = item.priceAtPurchase * item.quantity;
+                  const commission = revenue * 0.1; // Example commission rate
+
+                  // Find or create analytics record for current month
+                  const currentMonth = new Date().toISOString().slice(0, 7) + '-01';
+                  
+                  await Analytics.findOrCreate({
+                    where: { 
+                      seller_id: item.sellerId,
+                      period: currentMonth
+                    },
+                    defaults: {
+                      total_sales: 0,
+                      total_orders: 0,
+                      total_revenue: 0,
+                      total_commission: 0
+                    }
+                  }).then(async ([analytics]) => {
+                    await analytics.increment({
+                      total_sales: item.quantity,
+                      total_orders: 1, // Only counted once per order per seller ideally, simplified here
+                      total_revenue: revenue,
+                      total_commission: commission
+                    });
+                  });
+                  
+                  // Also update Seller total revenue
+                  const seller = await Seller.findByPk(item.sellerId);
+                  if (seller) {
+                    await seller.increment({
+                      total_revenue: revenue,
+                      total_orders: 1
+                    });
+                  }
+                }
+              }
+            } catch (analyticsError) {
+              console.error('Failed to update analytics:', analyticsError.message);
+            }
+
+          console.log(`Payment verified and confirmed for order ${order?.id}`);
+        } else if (verificationResult.status === 'failed') {
+          payment.status = 'failed';
+          payment.chapa_response = verificationResult;
+          await payment.save();
+
+          const order = payment.order;
+          if (order && order.payment_status !== 'failed') {
+            order.payment_status = 'failed';
+            order.order_status = 'pending';
+            await order.save();
+          }
+
+          // Record payment failure metrics
+          paymentMetrics.recordPaymentFailure({
+            paymentId: payment.id,
+            orderId: order?.id,
+            amount: payment.amount,
+            reason: verificationResult.message || 'Payment failed'
+          });
+
+          // Log payment failure
+          securityLogger.logPaymentFailure({
+            paymentId: payment.id,
+            orderId: order?.id,
+            reference: tx_ref,
+            amount: payment.amount,
+            reason: verificationResult.message || 'Payment failed'
+          });
+
+          // Send payment failure email
+          // Task 16.1.3: Implement graceful degradation for email failures
+          try {
+            const emailService = require('../services/emailService');
+            const emailResult = await emailService.sendPaymentFailure({
+              email: order.user?.email,
+              firstName: order.user?.first_name,
+              lastName: order.user?.last_name,
+              orderId: order.id,
+              orderNumber: order.order_number,
+              amount: payment.amount,
+              currency: payment.currency,
+              reference: tx_ref,
+              failureReason: verificationResult.message || 'Payment could not be processed'
+            });
+            
+            // Log email result but don't fail verification
+            if (!emailResult.success) {
+              const logger = require('../utils/logger');
+              logger.logEmailFailure({
+                emailType: 'payment_failure',
+                recipient: order.user?.email,
+                error: emailResult.error,
+                orderId: order.id,
+                paymentId: payment.id
+              });
+            }
+          } catch (emailError) {
+            // Task 16.1.3: Graceful degradation - log error but don't fail verification
+            const logger = require('../utils/logger');
+            logger.logEmailFailure({
+              emailType: 'payment_failure',
+              recipient: order.user?.email,
+              error: emailError.message,
+              orderId: order.id,
+              paymentId: payment.id
+            });
+            
+            console.error('Failed to send payment failure email from webhook:', emailError.message);
+          }
+
+          console.log(`Payment verification failed for order ${order?.id}`);
+        }
+      } catch (verifyError) {
+        console.error(`Async verification failed for tx_ref ${tx_ref}:`, verifyError.message);
+      }
+    });
+
+    // Property 14: Callback Acknowledgment
+    // Respond immediately to Chapa (don't wait for verification)
+    
+    // Record webhook delivery success
+    const duration = Date.now() - startTime;
+    paymentMetrics.recordWebhookDelivery(true, { txRef: tx_ref });
+    paymentMetrics.recordResponseTime(duration, 'webhook');
+    
+    res.status(200).json(formatResponse(true, 'Webhook received and processing'));
+  } catch (error) {
+    console.error('Webhook processing error:', error);
+    
+    // Record webhook delivery failure
+    paymentMetrics.recordWebhookDelivery(false, { 
+      txRef: req.body?.tx_ref, 
+      reason: error.message 
+    });
+    
+    // Property 14: Still acknowledge receipt even on error
+    res.status(200).json(formatResponse(true, 'Webhook received with errors', { error: error.message }));
+  }
+};
+
+/**
+ * Manually verify payment status
+ * GET /api/payments/verify/:reference
+ * Requirements: 4.1, 4.3, 4.4, 4.5, 4.6, 4.7, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6
+ * Properties: 16, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 52
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+const verifyPayment = async (req, res) => {
+  const startTime = Date.now();
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const { reference } = req.params;
+
+    if (!reference) {
+      await transaction.rollback();
+      return res.status(400).json(formatResponse(false, 'Payment reference is required'));
+    }
+
+    // Log verification attempt
+    securityLogger.logPaymentVerification({
+      reference,
+      userId: req.user?.id,
+      ip: req.ip
+    });
+
+    // Find payment by reference
+    const payment = await Payment.findOne({
+      where: { chapa_tx_ref: reference },
+      include: [{ 
+        model: Order, 
+        as: 'order',
+        include: [{
+          model: User,
+          as: 'user',
+          attributes: ['id', 'email', 'first_name', 'last_name']
+        }]
+      }],
+      transaction
+    });
+
+    if (!payment) {
+      await transaction.rollback();
+      return res.status(404).json(formatResponse(false, 'Payment not found'));
+    }
+
+    // Verify payment with Chapa (with retry logic)
+    const verificationResult = await chapaService.verifyPayment(reference);
+
+    // Property 17: Status Validation in Verification
+    // Property 18: Amount Validation in Verification
+    // Property 19: Currency Validation in Verification
+    // Property 52: Payment Round-Trip Validation
+    
+    // Validate amount matches (Property 18)
+    const expectedAmount = parseFloat(payment.amount);
+    const verifiedAmount = parseFloat(verificationResult.amount);
+    
+    if (Math.abs(expectedAmount - verifiedAmount) > 0.01) {
+      // Property 20: Verification Failure Logging
+      console.error(`Amount mismatch for payment ${payment.id}: expected ${expectedAmount}, got ${verifiedAmount}`);
+      
+      // Log amount mismatch
+      securityLogger.logAmountMismatch({
+        paymentId: payment.id,
+        reference,
+        expectedAmount,
+        receivedAmount: verifiedAmount
+      });
+      
+      // Property 53: Round-Trip Mismatch Rejection
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Payment verification failed',
+        error: 'Amount mismatch detected',
+        details: {
+          expected: expectedAmount,
+          received: verifiedAmount
+        }
+      });
+    }
+
+    // Validate currency matches (Property 19)
+    const expectedCurrency = payment.currency || 'ETB';
+    const verifiedCurrency = verificationResult.currency || 'ETB';
+    
+    if (expectedCurrency !== verifiedCurrency) {
+      // Property 20: Verification Failure Logging
+      console.error(`Currency mismatch for payment ${payment.id}: expected ${expectedCurrency}, got ${verifiedCurrency}`);
+      
+      // Log currency mismatch
+      securityLogger.logCurrencyMismatch({
+        paymentId: payment.id,
+        reference,
+        expectedCurrency,
+        receivedCurrency: verifiedCurrency
+      });
+      
+      // Property 53: Round-Trip Mismatch Rejection
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Payment verification failed',
+        error: 'Currency mismatch detected',
+        details: {
+          expected: expectedCurrency,
+          received: verifiedCurrency
+        }
+      });
+    }
+
+    // Property 17: Status Validation in Verification
+    if (verificationResult.status === 'success') {
+      // Property 28: No Confirmation Without Verification (already verified above)
+      // Property 21: Order Confirmation on Successful Verification
+      
+      // Update payment status
+      payment.status = 'success';
+      payment.payment_method = verificationResult.paymentMethod;
+      payment.transaction_id = verificationResult.transactionId;
+      payment.chapa_response = verificationResult;
+      payment.paid_at = new Date();
+      await payment.save({ transaction });
+
+      // Property 23: Order Status Update on Confirmation
+      const order = payment.order;
+      if (order.payment_status !== 'paid') {
+        order.payment_status = 'paid';
+        order.order_status = 'confirmed';
+        order.paid_at = new Date();
+        
+        // Property 24: Chapa Reference Storage
+        order.payment_method = verificationResult.paymentMethod;
+        await order.save({ transaction });
+
+        // Log payment success
+        securityLogger.logPaymentSuccess({
+          paymentId: payment.id,
+          orderId: order.id,
+          reference,
+          amount: payment.amount,
+          currency: payment.currency,
+          paymentMethod: verificationResult.paymentMethod
+        });
+
+        // Log order confirmation
+        securityLogger.logOrderConfirmation({
+          orderId: order.id,
+          orderNumber: order.order_number,
+          paymentId: payment.id,
+          reference,
+          amount: payment.amount
+        });
+
+        // Property 25: Confirmation Email Sending
+        // Property 26: Success Response on Confirmation
+        // Task 16.1.3: Implement graceful degradation for email failures
+        // Task 16.1.4: Add retry queue for failed operations
+        try {
+          const emailService = require('../services/emailService');
+          const emailResult = await emailService.sendPaymentConfirmation({
+            email: order.user?.email,
+            firstName: order.user?.first_name,
+            lastName: order.user?.last_name,
+            orderId: order.id,
+            orderNumber: order.order_number,
+            amount: payment.amount,
+            currency: payment.currency,
+            paymentMethod: verificationResult.paymentMethod,
+            reference: reference
+          });
+          
+          // Log email result but don't fail payment
+          if (!emailResult.success) {
+            const logger = require('../utils/logger');
+            logger.logEmailFailure({
+              emailType: 'payment_confirmation',
+              recipient: order.user?.email,
+              error: emailResult.error,
+              orderId: order.id,
+              paymentId: payment.id
+            });
+          }
+        } catch (emailError) {
+          // Property 27: Confirmation Failure Handling
+          // Task 16.1.3: Graceful degradation - log error but don't fail payment
+          // Task 16.1.4: Add to retry queue
+          const logger = require('../utils/logger');
+          const retryQueue = require('../utils/retryQueue');
+          
+          logger.logEmailFailure({
+            emailType: 'payment_confirmation',
+            recipient: order.user?.email,
+            error: emailError.message,
+            orderId: order.id,
+            paymentId: payment.id
+          });
+          
+          console.error('Failed to send confirmation email:', emailError.message);
+          
+          // Add to retry queue
+          const emailService = require('../services/emailService');
+          retryQueue.addEmailToQueue(
+            async () => {
+              await emailService.sendPaymentConfirmation({
+                email: order.user?.email,
+                firstName: order.user?.first_name,
+                lastName: order.user?.last_name,
+                orderId: order.id,
+                orderNumber: order.order_number,
+                amount: payment.amount,
+                currency: payment.currency,
+                paymentMethod: verificationResult.paymentMethod,
+                reference: reference
+              });
+            },
+            {
+              emailType: 'payment_confirmation',
+              recipient: order.user?.email,
+              orderId: order.id,
+              paymentId: payment.id,
+              reference: reference
+            }
+          );
+          
+          // Don't fail the payment, just log the error
+          // Mark for manual review if needed
+          order.admin_notes = (order.admin_notes || '') + `\nConfirmation email failed: ${emailError.message}`;
+          await order.save({ transaction });
+        }
+      }
+
+      await transaction.commit();
+
+      // Record metrics
+      paymentMetrics.recordPaymentSuccess({
+        paymentId: payment.id,
+        orderId: payment.order_id,
+        amount: payment.amount,
+        paymentMethod: verificationResult.paymentMethod
+      });
+      
+      // Record response time
+      const duration = Date.now() - startTime;
+      paymentMetrics.recordResponseTime(duration, 'verify');
+
+      res.status(200).json(formatResponse(true, 'Payment verification completed', {
+        payment: {
+          id: payment.id,
+          orderId: payment.order_id,
+          amount: payment.amount.toString(),
+          status: payment.status,
+          chapaReference: payment.chapa_tx_ref,
+          paymentMethod: payment.payment_method
+        },
+        verificationResult
+      }));
+    } else if (verificationResult.status === 'failed') {
+      // Property 35: Failure Reason Extraction
+      const failureReason = verificationResult.message || 'Payment failed';
+      
+      payment.status = 'failed';
+      payment.chapa_response = verificationResult;
+      await payment.save({ transaction });
+
+      // Update order status to payment_failed
+      const order = payment.order;
+      if (order.payment_status !== 'failed') {
+        order.payment_status = 'failed';
+        order.order_status = 'pending';
+        await order.save({ transaction });
+      }
+
+      // Record metrics
+      paymentMetrics.recordPaymentFailure({
+        paymentId: payment.id,
+        orderId: order.id,
+        amount: payment.amount,
+        reason: failureReason
+      });
+
+      // Log payment failure
+      securityLogger.logPaymentFailure({
+        paymentId: payment.id,
+        orderId: order.id,
+        reference,
+        amount: payment.amount,
+        reason: failureReason
+      });
+
+      // Send payment failure email
+      // Task 16.1.3: Implement graceful degradation for email failures
+      try {
+        const emailService = require('../services/emailService');
+        const emailResult = await emailService.sendPaymentFailure({
+          email: order.user?.email,
+          firstName: order.user?.first_name,
+          lastName: order.user?.last_name,
+          orderId: order.id,
+          orderNumber: order.order_number,
+          amount: payment.amount,
+          currency: payment.currency,
+          reference: reference,
+          failureReason: failureReason
+        });
+        
+        // Log email result but don't fail verification
+        if (!emailResult.success) {
+          const logger = require('../utils/logger');
+          logger.logEmailFailure({
+            emailType: 'payment_failure',
+            recipient: order.user?.email,
+            error: emailResult.error,
+            orderId: order.id,
+            paymentId: payment.id
+          });
+        }
+      } catch (emailError) {
+        // Task 16.1.3: Graceful degradation - log error but don't fail verification
+        const logger = require('../utils/logger');
+        logger.logEmailFailure({
+          emailType: 'payment_failure',
+          recipient: order.user?.email,
+          error: emailError.message,
+          orderId: order.id,
+          paymentId: payment.id
+        });
+        
+        console.error('Failed to send payment failure email:', emailError.message);
+        // Don't fail the verification, just log the error
+      }
+
+      await transaction.commit();
+
+      // Record response time
+      const duration = Date.now() - startTime;
+      paymentMetrics.recordResponseTime(duration, 'verify');
+
+      // Property 36: Failure Reason Propagation
+      res.status(200).json(formatResponse(true, 'Payment verification completed', {
+        payment: {
+          id: payment.id,
+          orderId: payment.order_id,
+          amount: payment.amount.toString(),
+          status: payment.status,
+          chapaReference: payment.chapa_tx_ref,
+          paymentMethod: payment.payment_method,
+          failureReason: failureReason
+        },
+        verificationResult
+      }));
+    } else {
+      // Pending or unknown status
+      await transaction.commit();
+      
+      // Record response time
+      const duration = Date.now() - startTime;
+      paymentMetrics.recordResponseTime(duration, 'verify');
+      
+      res.status(200).json(formatResponse(true, 'Payment verification completed', {
+        payment: {
+          id: payment.id,
+          orderId: payment.order_id,
+          amount: payment.amount.toString(),
+          status: payment.status,
+          chapaReference: payment.chapa_tx_ref,
+          paymentMethod: payment.payment_method
+        },
+        verificationResult
+      }));
+    }
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Payment verification error:', error);
+    
+    // Property 20: Verification Failure Logging
+    console.error(`Verification failed for reference ${req.params.reference}: ${error.message}`);
+    
+    res.status(500).json(formatResponse(false, 'Failed to verify payment', { error: error.message }));
+  }
+};
+
+/**
+ * Get payment history with filtering
+ * GET /api/payments/history
+ * Requirements: 8.6
+ * Properties: 43
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+const getPaymentHistory = async (req, res) => {
+  try {
+    const { orderId, txRef, status, page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+
+    // Build where clause based on filters
+    const where = {};
+    
+    if (orderId) {
+      where.order_id = orderId;
+    }
+    
+    if (txRef) {
+      where.chapa_tx_ref = txRef;
+    }
+    
+    if (status) {
+      where.status = status;
+    }
+
+    // Property 43: Admin Query Endpoint Functionality
+    const { count, rows: payments } = await Payment.findAndCountAll({
+      where,
+      include: [{
+        model: Order,
+        as: 'order',
+        include: [{
+          model: User,
+          as: 'user',
+          attributes: ['id', 'email', 'first_name', 'last_name']
+        }]
+      }],
+      order: [['created_at', 'DESC']],
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Payment history retrieved successfully',
+      data: {
+        payments: payments.map(p => ({
+          id: p.id,
+          orderId: p.order_id,
+          orderNumber: p.order?.order_number,
+          amount: p.amount.toString(),
+          currency: p.currency,
+          status: p.status,
+          paymentMethod: p.payment_method,
+          chapaReference: p.chapa_tx_ref,
+          transactionId: p.transaction_id,
+          customerEmail: p.order?.user?.email,
+          customerName: `${p.order?.user?.first_name || ''} ${p.order?.user?.last_name || ''}`.trim(),
+          paidAt: p.paid_at,
+          createdAt: p.created_at,
+          updatedAt: p.updated_at
+        })),
+        pagination: {
+          total: count,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil(count / limit)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get payment history error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve payment history',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Manually verify a transaction (admin endpoint)
+ * POST /api/payments/admin/verify/:reference
+ * Requirements: 8.7, 10.7
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+const adminVerifyPayment = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const { reference } = req.params;
+
+    if (!reference) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Payment reference is required'
+      });
+    }
+
+    // Find payment by reference
+    const payment = await Payment.findOne({
+      where: { chapa_tx_ref: reference },
+      include: [{
+        model: Order,
+        as: 'order',
+        include: [{
+          model: User,
+          as: 'user',
+          attributes: ['id', 'email', 'first_name', 'last_name']
+        }]
+      }],
+      transaction
+    });
+
+    if (!payment) {
+      await transaction.rollback();
+      return res.status(404).json({
+        success: false,
+        message: 'Payment not found'
+      });
+    }
+
+    // Verify payment with Chapa (with retry logic)
+    const verificationResult = await chapaService.verifyPayment(reference);
+
+    // Validate amount and currency
+    const expectedAmount = parseFloat(payment.amount);
+    const verifiedAmount = parseFloat(verificationResult.amount);
+    const expectedCurrency = payment.currency || 'ETB';
+    const verifiedCurrency = verificationResult.currency || 'ETB';
+
+    if (Math.abs(expectedAmount - verifiedAmount) > 0.01) {
+      console.error(`Admin verification - Amount mismatch for payment ${payment.id}: expected ${expectedAmount}, got ${verifiedAmount}`);
+      
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Payment verification failed',
+        error: 'Amount mismatch detected',
+        details: {
+          expected: expectedAmount,
+          received: verifiedAmount
+        }
+      });
+    }
+
+    if (expectedCurrency !== verifiedCurrency) {
+      console.error(`Admin verification - Currency mismatch for payment ${payment.id}: expected ${expectedCurrency}, got ${verifiedCurrency}`);
+      
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Payment verification failed',
+        error: 'Currency mismatch detected',
+        details: {
+          expected: expectedCurrency,
+          received: verifiedCurrency
+        }
+      });
+    }
+
+    // Update payment and order based on verification result
+    if (verificationResult.status === 'success') {
+      payment.status = 'success';
+      payment.payment_method = verificationResult.paymentMethod;
+      payment.transaction_id = verificationResult.transactionId;
+      payment.chapa_response = verificationResult;
+      payment.paid_at = new Date();
+      await payment.save({ transaction });
+
+      const order = payment.order;
+      if (order.payment_status !== 'paid') {
+        order.payment_status = 'paid';
+        order.order_status = 'confirmed';
+        order.paid_at = new Date();
+        order.payment_method = verificationResult.paymentMethod;
+        await order.save({ transaction });
+
+        // Send confirmation email
+        try {
+          const emailService = require('../services/emailService');
+          await emailService.sendPaymentConfirmation({
+            email: order.user?.email,
+            firstName: order.user?.first_name,
+            lastName: order.user?.last_name,
+            orderId: order.id,
+            orderNumber: order.order_number,
+            amount: payment.amount,
+            currency: payment.currency,
+            paymentMethod: verificationResult.paymentMethod,
+            reference: reference
+          });
+        } catch (emailError) {
+          console.error('Failed to send confirmation email (admin verification):', emailError.message);
+          order.admin_notes = (order.admin_notes || '') + `\nConfirmation email failed (admin verification): ${emailError.message}`;
+          await order.save({ transaction });
+        }
+      }
+
+      await transaction.commit();
+
+      res.status(200).json({
+        success: true,
+        message: 'Payment manually verified and confirmed',
+        data: {
+          payment: {
+            id: payment.id,
+            orderId: payment.order_id,
+            amount: payment.amount.toString(),
+            status: payment.status,
+            chapaReference: payment.chapa_tx_ref,
+            paymentMethod: payment.payment_method
+          },
+          verificationResult
+        }
+      });
+    } else if (verificationResult.status === 'failed') {
+      payment.status = 'failed';
+      payment.chapa_response = verificationResult;
+      await payment.save({ transaction });
+
+      const order = payment.order;
+      if (order.payment_status !== 'failed') {
+        order.payment_status = 'failed';
+        order.order_status = 'pending';
+        await order.save({ transaction });
+      }
+
+      // Send payment failure email
+      try {
+        const emailService = require('../services/emailService');
+        await emailService.sendPaymentFailure({
+          email: order.user?.email,
+          firstName: order.user?.first_name,
+          lastName: order.user?.last_name,
+          orderId: order.id,
+          orderNumber: order.order_number,
+          amount: payment.amount,
+          currency: payment.currency,
+          reference: reference,
+          failureReason: verificationResult.message || 'Payment failed'
+        });
+      } catch (emailError) {
+        console.error('Failed to send payment failure email (admin verification):', emailError.message);
+      }
+
+      await transaction.commit();
+
+      res.status(200).json({
+        success: true,
+        message: 'Payment verification completed - payment failed',
+        data: {
+          payment: {
+            id: payment.id,
+            orderId: payment.order_id,
+            amount: payment.amount.toString(),
+            status: payment.status,
+            chapaReference: payment.chapa_tx_ref,
+            paymentMethod: payment.payment_method,
+            failureReason: verificationResult.message || 'Payment failed'
+          },
+          verificationResult
+        }
+      });
+    } else {
+      await transaction.commit();
+      
+      res.status(200).json({
+        success: true,
+        message: 'Payment verification completed - status pending',
+        data: {
+          payment: {
+            id: payment.id,
+            orderId: payment.order_id,
+            amount: payment.amount.toString(),
+            status: payment.status,
+            chapaReference: payment.chapa_tx_ref,
+            paymentMethod: payment.payment_method
+          },
+          verificationResult
+        }
+      });
+    }
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Admin payment verification error:', error);
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to verify payment',
+      error: error.message
+    });
+  }
+};
+
+module.exports = {
+  initiatePayment,
+  handleWebhook,
+  verifyPayment,
+  getPaymentHistory,
+  adminVerifyPayment
+};

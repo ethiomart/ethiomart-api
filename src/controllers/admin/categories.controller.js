@@ -10,7 +10,7 @@ exports.getAllCategories = async (req, res, next) => {
         { model: Category, as: 'children' },
         { model: Product, as: 'products', attributes: ['id'] }
       ],
-      where: { parentId: null },
+      where: { parent_id: null },
       order: [['sort_order', 'ASC'], ['name', 'ASC']]
     });
 
@@ -32,7 +32,7 @@ exports.createCategory = async (req, res, next) => {
       name,
       slug,
       description,
-      parentId: parentId || null,
+      parent_id: parentId || null,
       status: status || 'active',
       image
     });
@@ -59,7 +59,7 @@ exports.updateCategory = async (req, res, next) => {
       name,
       slug,
       description,
-      parentId: parentId || null,
+      parent_id: parentId || null,
       status
     };
 
@@ -86,7 +86,7 @@ exports.deleteCategory = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
-    const productCount = await Product.count({ where: { categoryId: category.id } });
+    const productCount = await Product.count({ where: { category_id: category.id } });
     if (productCount > 0) {
       return res.status(400).json({ 
         success: false, 
@@ -96,7 +96,7 @@ exports.deleteCategory = async (req, res, next) => {
       });
     }
 
-    const childrenCount = await Category.count({ where: { parentId: category.id } });
+    const childrenCount = await Category.count({ where: { parent_id: category.id } });
     if (childrenCount > 0) {
       return res.status(400).json({ 
         success: false, 
@@ -124,7 +124,7 @@ exports.reorderCategories = async (req, res, next) => {
     await sequelize.transaction(async (t) => {
       for (const item of order) {
         await Category.update(
-          { sort_order: item.sort_order, parentId: item.parentId },
+          { sort_order: item.sort_order, parent_id: item.parentId },
           { where: { id: item.id }, transaction: t }
         );
       }

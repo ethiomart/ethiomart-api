@@ -3,9 +3,11 @@ const User = require('../models/User');
 const OrderItem = require('../models/OrderItem');
 const Product = require('../models/Product');
 const Order = require('../models/Order');
+const Payment = require('../models/Payment');
 const { Op } = require('sequelize');
 const sequelize = require('../config/database');
 const orderStatusService = require('../services/orderStatusService');
+const { transformImageUrls } = require('../utils/imageUtils');
 
 /**
  * Create seller profile for authenticated user
@@ -95,9 +97,11 @@ const getSellerProfile = async (req, res, next) => {
       businessDescription: sellerData.store_description,
       businessAddress: sellerData.business_address,
       phoneNumber: sellerData.business_phone,
-      logoUrl: sellerData.store_logo,
+      logoUrl: transformImageUrls(req, sellerData.store_logo),
+      approvalStatus: sellerData.approval_status,
+      rejectionReason: sellerData.rejection_reason,
       // Keep snake_case for backward compatibility
-      logo_url: sellerData.store_logo
+      logo_url: transformImageUrls(req, sellerData.store_logo)
     };
 
     res.status(200).json({
@@ -220,6 +224,8 @@ const uploadLogo = async (req, res, next) => {
       businessAddress: sellerData.business_address,
       phoneNumber: sellerData.business_phone,
       logoUrl: sellerData.store_logo,
+      approvalStatus: sellerData.approval_status,
+      rejectionReason: sellerData.rejection_reason,
       // Keep snake_case for backward compatibility
       logo_url: sellerData.store_logo
     };
@@ -228,7 +234,7 @@ const uploadLogo = async (req, res, next) => {
       success: true,
       message: 'Logo uploaded successfully',
       data: {
-        logoUrl: logoUrl,
+        logoUrl: transformImageUrls(req, logoUrl),
         seller: formattedSeller
       }
     });
@@ -514,33 +520,87 @@ const getEarnings = async (req, res, next) => {
       });
     }
 
-    // Calculate total earnings from completed orders
-    const completedSalesResult = await OrderItem.findOne({
+    // Calculate total earnings from completed orders with successful payments
+    // Use a subquery approach to avoid GROUP BY issues
+    const completedOrderItems = await OrderItem.findAll({
       where: { 
         seller_id: seller.id,
         status: { [Op.in]: ['delivered', 'completed'] }
       },
-      attributes: [
-        [sequelize.fn('SUM', sequelize.col('price_at_purchase')), 'totalEarnings']
+      include: [
+        {
+          model: Order,
+          as: 'order',
+          required: true,
+          attributes: ['id'],
+          include: [
+            {
+              model: Payment,
+              as: 'payment',
+              required: true,
+              attributes: ['status'],
+              where: {
+                status: { [Op.in]: ['success', 'verified'] }
+              }
+            }
+          ]
+        }
       ],
+      attributes: ['price_at_purchase'],
       raw: true
     });
 
-    const totalEarnings = parseFloat(completedSalesResult?.totalEarnings || 0);
+    const totalEarnings = completedOrderItems.reduce((sum, item) => 
+      sum + parseFloat(item.price_at_purchase || 0), 0
+    );
 
-    // Calculate pending earnings (orders not yet delivered)
-    const pendingSalesResult = await OrderItem.findOne({
+    // Calculate pending earnings (orders not yet delivered or not yet paid)
+    const pendingOrderItems = await OrderItem.findAll({
       where: { 
         seller_id: seller.id,
         status: { [Op.in]: ['pending', 'confirmed', 'shipped'] }
       },
-      attributes: [
-        [sequelize.fn('SUM', sequelize.col('price_at_purchase')), 'pendingEarnings']
-      ],
+      attributes: ['price_at_purchase'],
       raw: true
     });
 
-    const pending = parseFloat(pendingSalesResult?.pendingEarnings || 0);
+    // Also get delivered orders without successful payment
+    const deliveredUnpaidItems = await OrderItem.findAll({
+      where: { 
+        seller_id: seller.id,
+        status: { [Op.in]: ['delivered', 'completed'] }
+      },
+      include: [
+        {
+          model: Order,
+          as: 'order',
+          required: true,
+          attributes: ['id'],
+          include: [
+            {
+              model: Payment,
+              as: 'payment',
+              required: false,
+              attributes: ['status']
+            }
+          ]
+        }
+      ],
+      attributes: ['price_at_purchase'],
+      raw: true
+    });
+
+    // Filter for items without payment or with non-successful payment
+    const unpaidDelivered = deliveredUnpaidItems.filter(item => {
+      const paymentStatus = item['order.payment.status'];
+      return !paymentStatus || (paymentStatus !== 'success' && paymentStatus !== 'verified');
+    });
+
+    const pending = pendingOrderItems.reduce((sum, item) => 
+      sum + parseFloat(item.price_at_purchase || 0), 0
+    ) + unpaidDelivered.reduce((sum, item) => 
+      sum + parseFloat(item.price_at_purchase || 0), 0
+    );
 
     // For now, assume no withdrawals (this would come from a withdrawals table in production)
     const withdrawn = 0;
@@ -553,7 +613,15 @@ const getEarnings = async (req, res, next) => {
         {
           model: Order,
           as: 'order',
-          attributes: ['id', 'created_at']
+          attributes: ['id', 'order_number', 'total_amount', 'created_at'],
+          include: [
+            {
+              model: Payment,
+              as: 'payment',
+              attributes: ['id', 'amount', 'currency', 'status', 'payment_method', 'chapa_tx_ref', 'paid_at', 'created_at'],
+              required: false
+            }
+          ]
         },
         {
           model: Product,
@@ -565,16 +633,44 @@ const getEarnings = async (req, res, next) => {
       limit: 50
     });
 
-    // Format transactions
-    const transactions = recentTransactions.map(item => ({
-      id: item.id.toString(),
-      type: 'sale',
-      amount: parseFloat(item.price_at_purchase),
-      status: item.status === 'delivered' || item.status === 'completed' ? 'completed' : 'pending',
-      createdAt: item.created_at,
-      description: `Sale of ${item.product.name}`,
-      orderId: item.order_id.toString()
-    }));
+    // Format transactions with payment details
+    const transactions = recentTransactions.map(item => {
+      const payment = item.order?.payment;
+      const itemAmount = parseFloat(item.price_at_purchase);
+      const orderTotal = parseFloat(item.order?.total_amount || 0);
+      
+      // Calculate commission (assuming 10% platform fee, seller gets 90%)
+      const commission = itemAmount * 0.10;
+      const sellerEarnings = itemAmount - commission;
+
+      // Determine if earnings are confirmed (order delivered AND payment successful)
+      const isOrderDelivered = item.status === 'delivered' || item.status === 'completed';
+      const isPaymentSuccessful = payment && (payment.status === 'success' || payment.status === 'verified');
+      const earningsConfirmed = isOrderDelivered && isPaymentSuccessful;
+
+      return {
+        id: item.id.toString(),
+        type: 'sale',
+        amount: itemAmount,
+        sellerEarnings: sellerEarnings,
+        commission: commission,
+        status: earningsConfirmed ? 'completed' : 'pending',
+        earningsConfirmed: earningsConfirmed,
+        createdAt: item.created_at,
+        description: `Sale of ${item.product.name}`,
+        orderId: item.order_id.toString(),
+        orderNumber: item.order?.order_number || '',
+        orderTotal: orderTotal,
+        // Payment details
+        paymentStatus: payment?.status || 'pending',
+        paymentAmount: payment ? parseFloat(payment.amount) : null,
+        paymentCurrency: payment?.currency || 'ETB',
+        paymentMethod: payment?.payment_method || null,
+        paymentTxRef: payment?.chapa_tx_ref || null,
+        paidAt: payment?.paid_at || null,
+        paymentDate: payment?.created_at || null
+      };
+    });
 
     res.status(200).json({
       success: true,

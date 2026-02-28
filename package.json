@@ -9,6 +9,8 @@
     "test": "node src/utils/integrationTest.js",
     "test:integration": "node src/utils/integrationTest.js",
     "test:wishlist": "set TESTING=true&& node src/utils/wishlistTests.js",
+    "test:jest": "jest",
+    "test:bugfix": "jest test/bugfix",
     "seed": "node src/seeders/seed.js"
   },
   "keywords": [],
@@ -32,11 +34,15 @@
     "multer": "^2.0.2",
     "mysql2": "^3.17.1",
     "nodemailer": "^8.0.1",
-    "sequelize": "^6.37.7"
+    "sequelize": "^6.37.7",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "cross-env": "^10.1.0",
     "fast-check": "^4.5.3",
+    "jest": "^30.2.0",
+    "jsdom": "^28.1.0",
     "nodemon": "^3.1.11",
     "supertest": "^7.2.2"
   }

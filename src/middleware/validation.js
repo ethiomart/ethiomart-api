@@ -137,7 +137,19 @@ const validateOrder = [
     .isObject()
     .withMessage('Shipping address must be an object'),
   
-  body('shippingAddress.street')
+  body('shippingAddress.full_name')
+    .trim()
+    .notEmpty()
+    .withMessage('Full name is required')
+    .escape(),
+  
+  body('shippingAddress.phone')
+    .trim()
+    .notEmpty()
+    .withMessage('Phone number is required')
+    .escape(),
+
+  body('shippingAddress.street_address')
     .trim()
     .notEmpty()
     .withMessage('Street address is required')
@@ -154,10 +166,9 @@ const validateOrder = [
     .trim()
     .escape(),
   
-  body('shippingAddress.postalCode')
+  body('shippingAddress.postal_code')
+    .optional()
     .trim()
-    .notEmpty()
-    .withMessage('Postal code is required')
     .escape(),
   
   body('shippingAddress.country')
@@ -208,13 +219,21 @@ const validateWishlistItem = [
 const validateSellerRegistration = [
   body('storeName')
     .trim()
-    .notEmpty()
-    .withMessage('Store name is required')
-    .isLength({ min: 3, max: 100 })
-    .withMessage('Store name must be between 3 and 100 characters')
+    .custom((value, { req }) => {
+      // Accept storeName or businessName
+      const name = value || req.body.businessName;
+      if (!name || name.trim() === '') {
+        throw new Error('Store name is required');
+      }
+      if (name.trim().length < 3 || name.trim().length > 100) {
+        throw new Error('Store name must be between 3 and 100 characters');
+      }
+      return true;
+    })
     .escape(),
   
   body('businessEmail')
+    .optional()
     .trim()
     .isEmail()
     .withMessage('Invalid business email format')

@@ -1,4 +1,5 @@
-const { Order, OrderItem, Cart, CartItem, Product, Seller, User, sequelize } = require('../models');
+const { Order, OrderItem, Cart, CartItem, Product, Seller, User, Payment, VariantCombination, sequelize } = require('../models');
+const chapaService = require('../services/chapaService');
 
 /**
  * Create order from cart with stock validation
@@ -10,12 +11,22 @@ const createOrder = async (req, res, next) => {
   
   try {
     const userId = req.user.id;
-    const { shippingAddress, shippingCost, paymentMethod, notes } = req.body;
+    let { shippingAddress, shippingCost, paymentMethod, notes } = req.body;
 
-    // Map 'chapa' to a valid enum value if necessary
-    const mappedPaymentMethod = paymentMethod === 'chapa' ? 'mobile_money' : (paymentMethod || 'cod');
+    // ============================================
+    // VALIDATION: All NOT NULL fields before insertion
+    // ============================================
+    
+    // 1. Validate user_id (required for foreign key constraint)
+    if (!userId || typeof userId !== 'number' || userId <= 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user ID. User must be authenticated.'
+      });
+    }
 
-    // Validate shipping address
+    // 2. Validate shipping address
     if (!shippingAddress) {
       await transaction.rollback();
       return res.status(400).json({
@@ -24,9 +35,80 @@ const createOrder = async (req, res, next) => {
       });
     }
 
+    // 3. Validate shipping address structure (if it's a JSON object)
+    if (typeof shippingAddress === 'object') {
+      const requiredAddressFields = ['full_name', 'phone', 'street_address', 'city', 'country'];
+      const missingAddressFields = requiredAddressFields.filter(field => !shippingAddress[field]);
+      
+      if (missingAddressFields.length > 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Shipping address is missing required fields: ${missingAddressFields.join(', ')}`
+        });
+      }
+
+      // Ensure shipping_address has the correct structure for database storage
+      // Trim whitespace from string fields to prevent validation issues
+      const trimmedAddress = {
+        full_name: String(shippingAddress.full_name || '').trim(),
+        phone: String(shippingAddress.phone || '').trim(),
+        street_address: String(shippingAddress.street_address || '').trim(),
+        city: String(shippingAddress.city || '').trim(),
+        country: String(shippingAddress.country || '').trim()
+      };
+
+      // Include optional fields if provided
+      if (shippingAddress.state) {
+        trimmedAddress.state = String(shippingAddress.state).trim();
+      }
+      if (shippingAddress.postal_code) {
+        trimmedAddress.postal_code = String(shippingAddress.postal_code).trim();
+      }
+      if (shippingAddress.is_default !== undefined) {
+        trimmedAddress.is_default = Boolean(shippingAddress.is_default);
+      }
+
+      // Validate that required fields are not empty after trimming
+      const emptyFields = requiredAddressFields.filter(field => !trimmedAddress[field]);
+      if (emptyFields.length > 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Shipping address has empty required fields: ${emptyFields.join(', ')}`
+        });
+      }
+
+      // Replace shippingAddress with the sanitized version
+      shippingAddress = trimmedAddress;
+    }
+
+    // 4. Validate shipping cost (must be a valid decimal >= 0)
+    const validatedShippingCost = parseFloat(shippingCost) || 0;
+    if (isNaN(validatedShippingCost) || validatedShippingCost < 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Shipping cost must be a valid non-negative number'
+      });
+    }
+
+    // Map 'chapa' to a valid enum value if necessary
+    const mappedPaymentMethod = paymentMethod === 'chapa' ? 'mobile_money' : (paymentMethod || 'cod');
+
+    // 5. Validate payment method (must be one of the allowed enum values)
+    const validPaymentMethods = ['card', 'mobile_money', 'bank_transfer', 'cod'];
+    if (mappedPaymentMethod && !validPaymentMethods.includes(mappedPaymentMethod)) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Invalid payment method. Must be one of: ${validPaymentMethods.join(', ')}`
+      });
+    }
+
     // Find user's cart with items
     const cart = await Cart.findOne({
-      where: { userId },
+      where: { user_id: userId },
       include: [
         {
           model: CartItem,
@@ -40,6 +122,10 @@ const createOrder = async (req, res, next) => {
                   model: Seller,
                   as: 'seller',
                   attributes: ['id']
+                },
+                {
+                  model: require('../models/VariantCombination'),
+                  as: 'variantCombinations'
                 }
               ]
             }
@@ -76,9 +162,20 @@ const createOrder = async (req, res, next) => {
           `Insufficient stock for "${item.product.name}". Only ${item.product.quantity} items available`
         );
       }
+
+      // Validate variant stock if variant is selected
+      if (item.variant_combination_id) {
+        const variant = await VariantCombination.findByPk(item.variant_combination_id, { transaction });
+        if (!variant) {
+          stockErrors.push(`Variant not found for "${item.product.name}"`);
+        } else if (item.quantity > variant.stock_quantity) {
+          stockErrors.push(`Insufficient stock for selected variation of "${item.product.name}". Only ${variant.stock_quantity} items available`);
+        }
+      }
     }
 
     if (stockErrors.length > 0) {
+      console.error('Stock validation failed for user:', userId, 'Errors:', stockErrors);
       await transaction.rollback();
       return res.status(400).json({
         success: false,
@@ -92,28 +189,91 @@ const createOrder = async (req, res, next) => {
     const orderItemsData = [];
 
     for (const item of cart.items) {
-      const itemTotal = item.quantity * parseFloat(item.product.price);
+      if (!item.product) continue; // Safety check (should have failed stock validation anyway)
+
+      // Use variant price if available, otherwise use product price
+      let itemPrice = parseFloat(item.product.price);
+      if (item.variant_combination_id) {
+        const variant = await VariantCombination.findByPk(item.variant_combination_id, { transaction });
+        if (variant && variant.price) {
+          itemPrice = parseFloat(variant.price);
+        }
+      }
+
+      const itemTotal = item.quantity * itemPrice;
       totalAmount += itemTotal;
 
       orderItemsData.push({
-        productId: item.productId,
-        sellerId: item.product.sellerId,
+        productId: item.product_id,
+        sellerId: item.product.seller_id,
+        variantCombinationId: item.variant_combination_id,
         quantity: item.quantity,
-        priceAtPurchase: item.product.price
+        priceAtPurchase: itemPrice
       });
     }
 
-    // Create order
+    // ============================================
+    // VALIDATION: Calculated amounts before insertion
+    // ============================================
+    
+    // 6. Validate total_amount (required NOT NULL field with no default)
+    const calculatedTotalAmount = parseFloat((totalAmount + validatedShippingCost).toFixed(2));
+    
+    if (isNaN(calculatedTotalAmount) || calculatedTotalAmount < 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid total amount calculated. Please check cart items and shipping cost.'
+      });
+    }
+
+    // 7. Validate subtotal (required NOT NULL field)
+    const calculatedSubtotal = parseFloat(totalAmount.toFixed(2));
+    
+    if (isNaN(calculatedSubtotal) || calculatedSubtotal < 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid subtotal calculated. Please check cart items.'
+      });
+    }
+
+    // 8. Validate order has at least one item
+    if (orderItemsData.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Order must contain at least one item'
+      });
+    }
+
+    // 9. Generate and validate order_number (required NOT NULL unique field)
+    const orderNumber = `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    
+    if (!orderNumber || orderNumber.length > 50) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to generate valid order number'
+      });
+    }
+
+    // ============================================
+    // Create order with validated data
+    // ============================================
     const order = await Order.create(
       {
         userId,
-        order_number: `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        subtotal: parseFloat((totalAmount - (shippingCost || 0)).toFixed(2)),
-        shipping_cost: shippingCost || 0,
-        totalAmount: parseFloat(totalAmount.toFixed(2)),
+        order_number: orderNumber,
+        subtotal: calculatedSubtotal,
+        shipping_cost: validatedShippingCost,
+        tax_amount: 0, // Explicitly set NOT NULL field with default
+        discount_amount: 0, // Explicitly set NOT NULL field with default
+        total_amount: calculatedTotalAmount, // Required NOT NULL field (no default)
         payment_method: mappedPaymentMethod,
-        status: 'pending',
-        shippingAddress,
+        payment_status: 'pending', // Explicitly set NOT NULL field with default
+        order_status: 'pending', // Explicitly set NOT NULL field with default
+        shipping_address: shippingAddress,
         notes: notes || ''
       },
       { transaction }
@@ -121,10 +281,51 @@ const createOrder = async (req, res, next) => {
 
     // Create order items and update product stock
     for (const itemData of orderItemsData) {
+      // 10. Validate seller_id for each order item (required for foreign key constraint)
+      if (!itemData.sellerId || typeof itemData.sellerId !== 'number' || itemData.sellerId <= 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Invalid seller ID for product ${itemData.productId}. Each product must have a valid seller.`
+        });
+      }
+
+      // 11. Validate product_id for each order item (required for foreign key constraint)
+      if (!itemData.productId || typeof itemData.productId !== 'number' || itemData.productId <= 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid product ID in order item'
+        });
+      }
+
+      // 12. Validate quantity for each order item (must be positive integer)
+      if (!itemData.quantity || typeof itemData.quantity !== 'number' || itemData.quantity <= 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Invalid quantity for product ${itemData.productId}. Quantity must be a positive number.`
+        });
+      }
+
+      // 13. Validate price_at_purchase for each order item (must be valid decimal)
+      const validatedPrice = parseFloat(itemData.priceAtPurchase);
+      if (isNaN(validatedPrice) || validatedPrice < 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Invalid price for product ${itemData.productId}. Price must be a valid non-negative number.`
+        });
+      }
+
       await OrderItem.create(
         {
-          orderId: order.id,
-          ...itemData
+          order_id: order.id,
+          product_id: itemData.productId,
+          seller_id: itemData.sellerId,
+          variant_combination_id: itemData.variantCombinationId,
+          quantity: itemData.quantity,
+          price_at_purchase: validatedPrice
         },
         { transaction }
       );
@@ -138,14 +339,133 @@ const createOrder = async (req, res, next) => {
           transaction
         }
       );
+
+      // Decrement variant stock if applicable
+      if (itemData.variantCombinationId) {
+        await VariantCombination.decrement(
+          'stock_quantity',
+          {
+            by: itemData.quantity,
+            where: { id: itemData.variantCombinationId },
+            transaction
+          }
+        );
+      }
     }
 
     // Clear cart items
     await CartItem.destroy({
-      where: { cartId: cart.id },
+      where: { cart_id: cart.id },
       transaction
     });
 
+    // ============================================
+    // PAYMENT INITIALIZATION (within transaction)
+    // ============================================
+    
+    // Initialize payment with Chapa if payment method requires it
+    let paymentInitResult = null;
+    let txRef = null;
+    
+    if (mappedPaymentMethod !== 'cod') {
+      try {
+        // Get user details for payment initialization
+        const user = await User.findByPk(userId, { transaction });
+        
+        if (!user) {
+          await transaction.rollback();
+          return res.status(400).json({
+            success: false,
+            message: 'User not found'
+          });
+        }
+
+        // Extract first name and last name from user's name
+        const nameParts = (user.name || 'Customer').split(' ');
+        const firstName = nameParts[0] || 'Customer';
+        const lastName = nameParts.slice(1).join(' ') || 'User';
+
+        // Initialize payment with Chapa
+        paymentInitResult = await chapaService.initializePayment(
+          order.id,
+          calculatedTotalAmount,
+          user.email,
+          user.first_name || 'Customer',
+          user.last_name || 'User',
+          user.phone || null,
+          mappedPaymentMethod
+        );
+
+        txRef = paymentInitResult.reference;
+
+        // Generate unique transaction ID for internal tracking
+        const transactionId = `TXN-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+
+        // Create payment record with "pending" status within transaction
+        await Payment.create(
+          {
+            order_id: order.id,
+            transaction_id: transactionId,
+            payment_method: mappedPaymentMethod,
+            amount: calculatedTotalAmount,
+            currency: paymentInitResult.currency || 'ETB',
+            status: 'pending',
+            chapa_tx_ref: txRef,
+            payment_data: {
+              payment_url: paymentInitResult.paymentUrl,
+              payment_methods: paymentInitResult.paymentMethods,
+              initialized_at: new Date().toISOString()
+            }
+          },
+          { transaction }
+        );
+
+        console.log('Payment initialized successfully:', {
+          orderId: order.id,
+          transactionId,
+          txRef,
+          amount: calculatedTotalAmount,
+          currency: paymentInitResult.currency || 'ETB',
+          timestamp: new Date().toISOString()
+        });
+      } catch (paymentError) {
+        // Rollback transaction if payment initialization fails
+        await transaction.rollback();
+        
+        console.error('Payment initialization failed:', {
+          orderId: order.id,
+          error: paymentError.message,
+          timestamp: new Date().toISOString()
+        });
+
+        return res.status(400).json({
+          success: false,
+          message: 'Payment initialization failed. Please try again.',
+          error: paymentError.message
+        });
+      }
+    } else {
+      // For COD orders, create payment record with pending status
+      const transactionId = `TXN-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      
+      await Payment.create(
+        {
+          order_id: order.id,
+          transaction_id: transactionId,
+          payment_method: 'cod',
+          amount: calculatedTotalAmount,
+          currency: 'ETB',
+          status: 'pending',
+          payment_data: {
+            payment_type: 'cash_on_delivery',
+            initialized_at: new Date().toISOString()
+          }
+        },
+        { transaction }
+      );
+    }
+
+    // Commit transaction only if all steps succeeded
     await transaction.commit();
 
     // Fetch created order with details
@@ -166,21 +486,169 @@ const createOrder = async (req, res, next) => {
               attributes: ['id', 'store_name']
             }
           ]
+        },
+        {
+          model: Payment,
+          as: 'payment',
+          attributes: ['id', 'payment_method', 'amount', 'currency', 'status', 'chapa_tx_ref']
         }
       ]
     });
 
+    // Prepare response based on payment method
+    const responseData = {
+      order: createdOrder
+    };
+
+    // Include payment URL for non-COD orders
+    if (paymentInitResult && paymentInitResult.paymentUrl) {
+      responseData.paymentUrl = paymentInitResult.paymentUrl;
+      responseData.txRef = txRef;
+    }
+
     res.status(201).json({
       success: true,
       message: 'Order created successfully',
-      data: {
-        order: createdOrder
-      }
+      data: responseData
     });
   } catch (error) {
     if (!transaction.finished) {
       await transaction.rollback();
     }
+    
+    // ============================================
+    // DETAILED DATABASE VALIDATION ERROR LOGGING
+    // ============================================
+    
+    // Log comprehensive error context
+    console.error('=== ORDER CREATION ERROR ===');
+    console.error('Timestamp:', new Date().toISOString());
+    console.error('Error Type:', error.name);
+    console.error('Error Message:', error.message);
+    console.error('User ID:', req.user?.id);
+    console.error('Request Body:', JSON.stringify(req.body, null, 2));
+    
+    // Log stack trace for debugging
+    if (error.stack) {
+      console.error('Stack Trace:', error.stack);
+    }
+
+    // Provide user-friendly error messages for common database validation errors
+    if (error.name === 'SequelizeValidationError') {
+      // Extract detailed validation error information
+      const validationErrors = error.errors.map(err => ({
+        field: err.path,
+        message: err.message,
+        value: err.value,
+        type: err.type,
+        validatorKey: err.validatorKey,
+        validatorName: err.validatorName
+      }));
+      
+      // Log detailed validation errors with field names and values
+      console.error('=== DATABASE VALIDATION ERRORS ===');
+      console.error('Timestamp:', new Date().toISOString());
+      console.error('Total Validation Errors:', validationErrors.length);
+      console.error('User ID:', req.user?.id);
+      
+      validationErrors.forEach((err, index) => {
+        console.error(`\nValidation Error #${index + 1}:`);
+        console.error('  Field Name:', err.field);
+        console.error('  Error Message:', err.message);
+        console.error('  Field Value:', typeof err.value === 'object' ? JSON.stringify(err.value) : err.value);
+        console.error('  Value Type:', typeof err.value);
+        console.error('  Validation Type:', err.type);
+        console.error('  Validator Key:', err.validatorKey);
+        console.error('  Validator Name:', err.validatorName);
+        
+        // Log additional context for specific field types
+        if (err.field === 'shipping_address' && typeof err.value === 'object') {
+          console.error('  Shipping Address Details:');
+          console.error('    - full_name:', err.value?.full_name);
+          console.error('    - phone:', err.value?.phone);
+          console.error('    - street_address:', err.value?.street_address);
+          console.error('    - city:', err.value?.city);
+          console.error('    - country:', err.value?.country);
+          console.error('    - state:', err.value?.state);
+          console.error('    - postal_code:', err.value?.postal_code);
+        }
+        
+        if (err.field === 'total_amount' || err.field === 'subtotal' || err.field === 'shipping_cost') {
+          console.error('  Amount Details:');
+          console.error('    - Raw Value:', err.value);
+          console.error('    - Parsed Value:', parseFloat(err.value));
+          console.error('    - Is NaN:', isNaN(parseFloat(err.value)));
+          console.error('    - Is Negative:', parseFloat(err.value) < 0);
+        }
+      });
+      
+      console.error('\n=== REQUEST DATA SNAPSHOT ===');
+      console.error('Shipping Address:', JSON.stringify(req.body.shippingAddress, null, 2));
+      console.error('Shipping Cost:', req.body.shippingCost);
+      console.error('Payment Method:', req.body.paymentMethod);
+      console.error('Notes:', req.body.notes);
+      console.error('================================\n');
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Order validation failed. Please check your order details.',
+        errors: validationErrors.map(e => `${e.field}: ${e.message}`)
+      });
+    }
+
+    if (error.name === 'SequelizeForeignKeyConstraintError') {
+      // Log detailed foreign key constraint error
+      console.error('=== FOREIGN KEY CONSTRAINT ERROR ===');
+      console.error('Table:', error.table);
+      console.error('Fields:', error.fields);
+      console.error('Value:', error.value);
+      console.error('Index:', error.index);
+      console.error('Parent Table:', error.parent?.table);
+      console.error('Parent Fields:', error.parent?.fields);
+      console.error('SQL:', error.sql);
+      console.error('====================================\n');
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid reference in order data. Please ensure all products and addresses are valid.'
+      });
+    }
+
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      // Log detailed unique constraint error
+      console.error('=== UNIQUE CONSTRAINT ERROR ===');
+      console.error('Fields:', error.fields);
+      console.error('Value:', error.value);
+      console.error('Parent:', error.parent);
+      console.error('SQL:', error.sql);
+      console.error('===============================\n');
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Duplicate order detected. Please try again.'
+      });
+    }
+
+    if (error.name === 'SequelizeDatabaseError') {
+      // Log detailed database error
+      console.error('=== DATABASE ERROR ===');
+      console.error('SQL:', error.sql);
+      console.error('Parameters:', error.parameters);
+      console.error('Parent Error:', error.parent);
+      console.error('Original Error:', error.original);
+      console.error('======================\n');
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Database error occurred. Please try again or contact support.'
+      });
+    }
+
+    // Log any other unexpected errors with full details
+    console.error('=== UNEXPECTED ERROR ===');
+    console.error('Error Object:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+    console.error('========================\n');
+
     next(error);
   }
 };
@@ -190,12 +658,17 @@ const createOrder = async (req, res, next) => {
  * @route GET /api/orders/customer/orders
  * @access Private (Customer)
  */
+/**
+ * Get customer's orders with payment details
+ * @route GET /api/orders/customer/orders
+ * @access Private (Customer)
+ */
 const getCustomerOrders = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    
+
     const orders = await Order.findAll({
-      where: { userId },
+      where: { user_id: userId },
       include: [
         {
           model: OrderItem,
@@ -207,11 +680,16 @@ const getCustomerOrders = async (req, res, next) => {
               attributes: ['id', 'name', 'price', 'images', 'description']
             }
           ]
+        },
+        {
+          model: Payment,
+          as: 'payment',
+          attributes: ['id', 'payment_method', 'amount', 'currency', 'status', 'chapa_tx_ref', 'paid_at', 'created_at']
         }
       ],
       order: [['created_at', 'DESC']]
     });
-    
+
     res.status(200).json({
       success: true,
       message: 'Customer orders retrieved successfully',
@@ -220,7 +698,7 @@ const getCustomerOrders = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-};
+}
 
 /**
  * Get user's orders (filtered by role)
@@ -249,16 +727,21 @@ const getOrders = async (req, res, next) => {
             attributes: ['id', 'store_name']
           }
         ]
+      },
+      {
+        model: Payment,
+        as: 'payment',
+        attributes: ['id', 'payment_method', 'amount', 'currency', 'status', 'chapa_tx_ref', 'paid_at', 'created_at']
       }
     ];
 
     if (userRole === 'customer') {
       // Customers see only their own orders
-      whereClause.userId = userId;
+      whereClause.user_id = userId;
     } else if (userRole === 'seller') {
       // Sellers see orders containing their products
       // Find seller profile
-      const seller = await Seller.findOne({ where: { userId } });
+      const seller = await Seller.findOne({ where: { user_id: userId } });
       
       if (!seller) {
         return res.status(404).json({
@@ -273,7 +756,7 @@ const getOrders = async (req, res, next) => {
           {
             model: OrderItem,
             as: 'items',
-            where: { sellerId: seller.id },
+            where: { seller_id: seller.id },
             required: true,
             include: [
               {
@@ -292,9 +775,14 @@ const getOrders = async (req, res, next) => {
             model: User,
             as: 'user',
             attributes: ['id', 'first_name', 'last_name', 'email']
+          },
+          {
+            model: Payment,
+            as: 'payment',
+            attributes: ['id', 'payment_method', 'amount', 'currency', 'status', 'chapa_tx_ref', 'paid_at', 'created_at']
           }
         ],
-        order: [['createdAt', 'DESC']]
+        order: [['created_at', 'DESC']]
       });
 
       return res.status(200).json({
@@ -310,7 +798,7 @@ const getOrders = async (req, res, next) => {
       includeClause.push({
         model: User,
         as: 'user',
-        attributes: ['id', 'firstName', 'lastName', 'email']
+        attributes: ['id', 'first_name', 'last_name', 'email']
       });
     }
 
@@ -318,7 +806,7 @@ const getOrders = async (req, res, next) => {
     const orders = await Order.findAll({
       where: whereClause,
       include: includeClause,
-      order: [['createdAt', 'DESC']]
+      order: [['created_at', 'DESC']]
     });
 
     res.status(200).json({
@@ -368,6 +856,11 @@ const getOrderById = async (req, res, next) => {
           model: User,
           as: 'user',
           attributes: ['id', 'first_name', 'last_name', 'email']
+        },
+        {
+          model: Payment,
+          as: 'payment',
+          attributes: ['id', 'payment_method', 'amount', 'currency', 'status', 'chapa_tx_ref', 'paid_at', 'created_at']
         }
       ]
     });

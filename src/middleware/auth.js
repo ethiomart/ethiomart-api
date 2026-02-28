@@ -74,8 +74,8 @@ const verifyToken = async (req, res, next) => {
       id: user.id,
       email: user.email,
       role: user.role,
-      firstName: user.firstName,
-      lastName: user.lastName
+      firstName: user.first_name,
+      lastName: user.last_name
     };
 
     next();
@@ -161,8 +161,8 @@ const optionalAuth = async (req, res, next) => {
         id: user.id,
         email: user.email,
         role: user.role,
-        firstName: user.firstName,
-        lastName: user.lastName
+        firstName: user.first_name,
+        lastName: user.last_name
       };
     } else {
       req.user = null;

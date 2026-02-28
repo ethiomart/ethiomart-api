@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const chapaService = require('../services/chapaService');
 const { verifyToken, requireRole } = require('../middleware/auth');
+const paymentController = require('../controllers/paymentController');
+const verifyWebhookSignature = require('../middleware/verifyWebhookSignature');
 
 /**
  * GET /api/chapa/payment-methods
@@ -29,6 +31,34 @@ router.get('/payment-methods', (req, res) => {
     });
   }
 });
+
+/**
+ * POST /api/chapa/callback
+ * Webhook endpoint for Chapa payment callbacks
+ * Public endpoint (Chapa will call this)
+ * Task 8.1: Add POST /api/payments/callback route
+ * Task 8.4: Add webhook signature verification middleware
+ * 
+ * Security: Webhook signature verification middleware validates that
+ * requests are genuinely from Chapa before processing
+ */
+router.post('/callback', verifyWebhookSignature, paymentController.handleCallback);
+
+/**
+ * GET /api/chapa/return
+ * Return URL endpoint for Chapa payment redirects
+ * Public endpoint (Chapa will redirect customers here after payment)
+ * Task 10.1: Add GET /api/payments/return route
+ * 
+ * This endpoint receives customers after they complete payment on Chapa's page.
+ * It returns an HTML page that signals the Flutter WebView to close and
+ * allows the app to poll for payment status.
+ * 
+ * Query Parameters:
+ * - tx_ref: Transaction reference
+ * - status: Payment status from Chapa (success, failed, cancelled)
+ */
+router.get('/return', paymentController.handleReturn);
 
 /**
  * GET /api/chapa/payment-methods/:id
@@ -138,3 +168,4 @@ router.post('/export-report', verifyToken, requireRole(['admin']), async (req, r
 });
 
 module.exports = router;
+

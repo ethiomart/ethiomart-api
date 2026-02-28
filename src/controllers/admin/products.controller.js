@@ -24,7 +24,7 @@ exports.getAllProducts = async (req, res, next) => {
       ],
       limit: parseInt(limit),
       offset,
-      order: [['createdAt', 'DESC']]
+      order: [['created_at', 'DESC']]
     });
 
     res.json({
@@ -112,7 +112,7 @@ exports.rejectProduct = async (req, res, next) => {
  */
 exports.featureProduct = async (req, res, next) => {
   try {
-    const { featured } = req.body;
+    const featured = req.body && req.body.featured !== undefined ? req.body.featured : true;
     const product = await Product.findByPk(req.params.id);
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found' });

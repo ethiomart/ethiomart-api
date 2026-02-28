@@ -85,7 +85,7 @@ exports.getDashboardStats = async (req, res, next) => {
       Seller.count({ where: { status: 'approved' } }),
       Product.count({ where: { status: 'approved' } }),
       Order.count(),
-      Order.sum('totalAmount', { where: { status: { [Op.in]: ['completed', 'delivered'] } } })
+      Order.sum('total_amount', { where: { order_status: { [Op.in]: ['completed', 'delivered'] } } })
     ]);
 
     // Get counts from 30 days ago for trend calculation
@@ -102,30 +102,30 @@ exports.getDashboardStats = async (req, res, next) => {
       User.count({ 
         where: { 
           role: 'customer',
-          createdAt: { [Op.lt]: thirtyDaysAgo }
+          created_at: { [Op.lt]: thirtyDaysAgo }
         } 
       }),
       Seller.count({ 
         where: { 
-          status: 'approved',
-          createdAt: { [Op.lt]: thirtyDaysAgo }
+          approval_status: 'approved',
+          created_at: { [Op.lt]: thirtyDaysAgo }
         } 
       }),
       Product.count({ 
         where: { 
-          status: 'approved',
-          createdAt: { [Op.lt]: thirtyDaysAgo }
+          approval_status: 'approved',
+          created_at: { [Op.lt]: thirtyDaysAgo }
         } 
       }),
       Order.count({ 
         where: { 
-          createdAt: { [Op.lt]: thirtyDaysAgo }
+          created_at: { [Op.lt]: thirtyDaysAgo }
         } 
       }),
-      Order.sum('totalAmount', { 
+      Order.sum('total_amount', { 
         where: { 
-          status: { [Op.in]: ['completed', 'delivered'] },
-          createdAt: { [Op.lt]: thirtyDaysAgo }
+          order_status: { [Op.in]: ['completed', 'delivered'] },
+          created_at: { [Op.lt]: thirtyDaysAgo }
         } 
       })
     ]);
@@ -171,8 +171,8 @@ exports.getDashboardOverview = async (req, res, next) => {
   try {
     // Get pending approvals
     const [pendingSellers, pendingProducts] = await Promise.all([
-      Seller.count({ where: { status: 'pending' } }),
-      Product.count({ where: { status: 'pending' } })
+      Seller.count({ where: { approval_status: 'pending' } }),
+      Product.count({ where: { approval_status: 'pending' } })
     ]);
 
     // Get recent orders (last 7 days)
@@ -181,17 +181,17 @@ exports.getDashboardOverview = async (req, res, next) => {
 
     const recentOrders = await Order.count({
       where: {
-        createdAt: { [Op.gte]: sevenDaysAgo }
+        created_at: { [Op.gte]: sevenDaysAgo }
       }
     });
 
     // Get revenue by status
     const revenueByStatus = await Order.findAll({
       attributes: [
-        'status',
-        [sequelize.fn('SUM', sequelize.col('totalAmount')), 'total']
+        ['order_status', 'status'],
+        [sequelize.fn('SUM', sequelize.col('total_amount')), 'total']
       ],
-      group: ['status']
+      group: ['order_status']
     });
 
     const overview = {
@@ -246,7 +246,7 @@ exports.getAllUsers = async (req, res, next) => {
       attributes: { exclude: ['password'] },
       limit: parseInt(limit),
       offset,
-      order: [['createdAt', 'DESC']]
+      order: [['created_at', 'DESC']]
     });
 
     res.json({
@@ -553,7 +553,7 @@ exports.getAllCategories = async (req, res, next) => {
         { model: Category, as: 'children' },
         { model: Product, as: 'products', attributes: ['id'] }
       ],
-      where: { parentId: null }, // Start from root
+      where: { parent_id: null }, // Start from root
       order: [['sort_order', 'ASC'], ['name', 'ASC']]
     });
 
@@ -575,7 +575,7 @@ exports.createCategory = async (req, res, next) => {
       name,
       slug,
       description,
-      parentId: parentId || null,
+      parent_id: parentId || null,
       status: status || 'active',
       image
     });
@@ -602,7 +602,7 @@ exports.updateCategory = async (req, res, next) => {
       name,
       slug,
       description,
-      parentId: parentId || null,
+      parent_id: parentId || null,
       status
     };
 
@@ -630,7 +630,7 @@ exports.deleteCategory = async (req, res, next) => {
     }
 
     // Check if category has products
-    const productCount = await Product.count({ where: { categoryId: category.id } });
+    const productCount = await Product.count({ where: { category_id: category.id } });
     if (productCount > 0) {
       return res.status(400).json({ 
         success: false, 
@@ -641,7 +641,7 @@ exports.deleteCategory = async (req, res, next) => {
     }
 
     // Check if category has children
-    const childrenCount = await Category.count({ where: { parentId: category.id } });
+    const childrenCount = await Category.count({ where: { parent_id: category.id } });
     if (childrenCount > 0) {
       return res.status(400).json({ 
         success: false, 
@@ -669,7 +669,7 @@ exports.reorderCategories = async (req, res, next) => {
     await sequelize.transaction(async (t) => {
       for (const item of order) {
         await Category.update(
-          { sort_order: item.sort_order, parentId: item.parentId },
+          { sort_order: item.sort_order, parent_id: item.parentId },
           { where: { id: item.id }, transaction: t }
         );
       }
@@ -973,11 +973,113 @@ exports.updateChapaSettings = async (req, res) => {
  */
 exports.getTransactions = async (req, res, next) => {
   try {
-    const transactions = await Payment.findAll({
-      include: [{ model: Order, as: 'order', attributes: ['order_number', 'total_amount'] }],
+    const { page = 1, limit = 20, status, order_id, tx_ref, dateFrom, dateTo } = req.query;
+    const where = {};
+
+    // Apply filters
+    if (status) where.status = status;
+    if (order_id) where.order_id = order_id;
+    if (tx_ref) where.chapa_tx_ref = { [Op.like]: `%${tx_ref}%` };
+    if (dateFrom && dateTo) {
+      where.created_at = { [Op.between]: [new Date(dateFrom), new Date(dateTo)] };
+    }
+
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    
+    const { count, rows: transactions } = await Payment.findAndCountAll({
+      where,
+      include: [
+        { 
+          model: Order, 
+          as: 'order', 
+          attributes: ['id', 'order_number', 'total_amount', 'order_status', 'created_at'],
+          include: [
+            { 
+              model: User, 
+              as: 'user', 
+              attributes: ['id', 'first_name', 'last_name', 'email', 'phone'] 
+            },
+            {
+              model: OrderItem,
+              as: 'items',
+              attributes: ['id', 'product_id', 'seller_id', 'quantity', 'price'],
+              include: [
+                {
+                  model: Product,
+                  as: 'product',
+                  attributes: ['id', 'name', 'sku', 'images']
+                },
+                {
+                  model: Seller,
+                  as: 'seller',
+                  attributes: ['id', 'store_name', 'email']
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      limit: parseInt(limit),
+      offset,
       order: [['created_at', 'DESC']]
     });
-    res.json({ success: true, data: transactions });
+
+    // Format the response with comprehensive transaction details
+    const formattedTransactions = transactions.map(payment => ({
+      id: payment.id,
+      order_id: payment.order_id,
+      transaction_id: payment.transaction_id,
+      chapa_tx_ref: payment.chapa_tx_ref,
+      payment_method: payment.payment_method,
+      amount: payment.amount,
+      currency: payment.currency,
+      status: payment.status,
+      paid_at: payment.paid_at,
+      created_at: payment.created_at,
+      updated_at: payment.updated_at,
+      order: payment.order ? {
+        id: payment.order.id,
+        order_number: payment.order.order_number,
+        total_amount: payment.order.total_amount,
+        order_status: payment.order.order_status,
+        created_at: payment.order.created_at,
+        customer: payment.order.user ? {
+          id: payment.order.user.id,
+          name: `${payment.order.user.first_name} ${payment.order.user.last_name}`,
+          email: payment.order.user.email,
+          phone: payment.order.user.phone
+        } : null,
+        items: payment.order.items ? payment.order.items.map(item => ({
+          id: item.id,
+          product_id: item.product_id,
+          product_name: item.product?.name,
+          product_sku: item.product?.sku,
+          product_image: item.product?.images && item.product.images.length > 0 ? item.product.images[0] : null,
+          quantity: item.quantity,
+          price: item.price,
+          seller: item.seller ? {
+            id: item.seller.id,
+            store_name: item.seller.store_name,
+            email: item.seller.email
+          } : null
+        })) : []
+      } : null,
+      chapa_response: payment.chapa_response,
+      payment_data: payment.payment_data
+    }));
+
+    res.json({ 
+      success: true, 
+      data: {
+        transactions: formattedTransactions,
+        pagination: {
+          total: count,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil(count / limit)
+        }
+      }
+    });
   } catch (error) {
     next(error);
   }
@@ -1207,15 +1309,15 @@ exports.getProductPerformance = async (req, res, next) => {
     // Top Selling Products
     const topSelling = await OrderItem.findAll({
       attributes: [
-        'productId',
+        ['product_id', 'productId'],
         [sequelize.fn('SUM', sequelize.col('quantity')), 'unitsSold'],
-        [sequelize.fn('SUM', sequelize.literal('quantity * price')), 'revenue']
+        [sequelize.fn('SUM', sequelize.literal('quantity * price_at_purchase')), 'revenue']
       ],
       include: [{ 
         model: Product, as: 'product', 
-        attributes: ['name', 'sku', 'stock', 'price', 'main_image'] 
+        attributes: ['name', 'sku', 'stock', 'price', 'images'] 
       }],
-      group: ['productId'],
+      group: ['product_id'],
       order: [[sequelize.literal('unitsSold'), 'DESC']],
       limit: parseInt(topSellingLimit)
     });
@@ -1226,7 +1328,7 @@ exports.getProductPerformance = async (req, res, next) => {
         stock: { [Op.lte]: 10 }, // Assuming 10 is low stock threshold
         is_active: true
       },
-      attributes: ['id', 'name', 'sku', 'stock', 'price', 'main_image'],
+      attributes: ['id', 'name', 'sku', 'stock', 'price', 'images'],
       order: [['stock', 'ASC']],
       limit: parseInt(lowStockLimit)
     });
@@ -1235,7 +1337,7 @@ exports.getProductPerformance = async (req, res, next) => {
     // For now, let's use revenue as a proxy or just the same as top selling for this demonstration,
     // or if the model has a 'views' field, use that.
     const mostViewed = await Product.findAll({
-      attributes: ['id', 'name', 'sku', 'stock', 'price', 'main_image', [sequelize.literal('0'), 'views']], // Mocking views as 0
+      attributes: ['id', 'name', 'sku', 'stock', 'price', 'images', [sequelize.literal('0'), 'views']], // Mocking views as 0
       order: [['created_at', 'DESC']],
       limit: parseInt(mostViewedLimit)
     });
@@ -1247,7 +1349,7 @@ exports.getProductPerformance = async (req, res, next) => {
           id: item.productId,
           name: item.product?.name,
           sku: item.product?.sku,
-          image: item.product?.main_image,
+          image: item.product?.images && item.product.images.length > 0 ? item.product.images[0] : null,
           unitsSold: item.getDataValue('unitsSold'),
           revenue: item.getDataValue('revenue'),
           stock: item.product?.stock
@@ -1286,13 +1388,13 @@ exports.getSellerPerformance = async (req, res, next) => {
     
     const performance = await OrderItem.findAll({
       attributes: [
-        'sellerId',
+        ['seller_id', 'sellerId'],
         [sequelize.fn('SUM', sequelize.col('quantity')), 'unitsSold'],
-        [sequelize.fn('SUM', sequelize.literal('quantity * price')), 'revenue'],
-        [sequelize.fn('COUNT', sequelize.fn('DISTINCT', sequelize.col('orderId'))), 'orderCount']
+        [sequelize.fn('SUM', sequelize.literal('quantity * price_at_purchase')), 'revenue'],
+        [sequelize.fn('COUNT', sequelize.fn('DISTINCT', sequelize.col('order_id'))), 'orderCount']
       ],
       include: [{ model: Seller, as: 'seller', attributes: ['store_name', 'logo'] }],
-      group: ['sellerId'],
+      group: ['seller_id'],
       order: [[sequelize.literal('revenue'), 'DESC']],
       limit: parseInt(limit)
     });

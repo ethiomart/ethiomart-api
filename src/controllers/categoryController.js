@@ -24,7 +24,7 @@ const createCategory = async (req, res, next) => {
     const category = await Category.create({
       name,
       description,
-      parentId: parentId || null
+      parent_id: parentId || null
     });
 
     res.status(201).json({
@@ -61,19 +61,19 @@ const getAllCategories = async (req, res, next) => {
         id: category.id,
         name: category.name,
         description: category.description,
-        parentId: category.parentId,
-        createdAt: category.createdAt,
-        updatedAt: category.updatedAt,
+        parentId: category.parent_id,
+        createdAt: category.created_at,
+        updatedAt: category.updated_at,
         children: []
       };
     });
 
     // Second pass: build tree structure
     categories.forEach(category => {
-      if (category.parentId === null) {
+      if (category.parent_id === null) {
         rootCategories.push(categoryMap[category.id]);
-      } else if (categoryMap[category.parentId]) {
-        categoryMap[category.parentId].children.push(categoryMap[category.id]);
+      } else if (categoryMap[category.parent_id]) {
+        categoryMap[category.parent_id].children.push(categoryMap[category.id]);
       }
     });
 
@@ -143,7 +143,7 @@ const updateCategory = async (req, res, next) => {
     const updateData = {};
     if (name !== undefined) updateData.name = name;
     if (description !== undefined) updateData.description = description;
-    if (parentId !== undefined) updateData.parentId = parentId;
+    if (parentId !== undefined) updateData.parent_id = parentId;
 
     await category.update(updateData);
 
@@ -179,7 +179,7 @@ const deleteCategory = async (req, res, next) => {
 
     // Check if category has children
     const childrenCount = await Category.count({
-      where: { parentId: id }
+      where: { parent_id: id }
     });
 
     if (childrenCount > 0) {
@@ -193,7 +193,7 @@ const deleteCategory = async (req, res, next) => {
 
     // Check if category has associated products
     const productsCount = await Product.count({
-      where: { categoryId: id }
+      where: { category_id: id }
     });
 
     if (productsCount > 0) {
@@ -229,10 +229,10 @@ const checkIfDescendant = async (ancestorId, descendantId) => {
     const category = await Category.findByPk(currentId);
     if (!category) break;
     
-    if (category.parentId === null) break;
-    if (parseInt(category.parentId) === parseInt(ancestorId)) return true;
+    if (category.parent_id === null) break;
+    if (parseInt(category.parent_id) === parseInt(ancestorId)) return true;
     
-    currentId = category.parentId;
+    currentId = category.parent_id;
   }
   
   return false;

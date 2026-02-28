@@ -16,10 +16,10 @@ exports.getDashboardStats = async (req, res, next) => {
       totalRevenue
     ] = await Promise.all([
       User.count({ where: { role: 'customer' } }),
-      Seller.count({ where: { status: 'approved' } }),
-      Product.count({ where: { status: 'approved' } }),
+      Seller.count({ where: { approval_status: 'approved' } }),
+      Product.count({ where: { approval_status: 'approved' } }),
       Order.count(),
-      Order.sum('totalAmount', { where: { status: { [Op.in]: ['completed', 'delivered'] } } })
+      Order.sum('total_amount', { where: { order_status: { [Op.in]: ['completed', 'delivered'] } } })
     ]);
 
     // Get counts from 30 days ago for trend calculation
@@ -36,30 +36,30 @@ exports.getDashboardStats = async (req, res, next) => {
       User.count({ 
         where: { 
           role: 'customer',
-          createdAt: { [Op.lt]: thirtyDaysAgo }
+          created_at: { [Op.lt]: thirtyDaysAgo }
         } 
       }),
       Seller.count({ 
         where: { 
-          status: 'approved',
-          createdAt: { [Op.lt]: thirtyDaysAgo }
+          approval_status: 'approved',
+          created_at: { [Op.lt]: thirtyDaysAgo }
         } 
       }),
       Product.count({ 
         where: { 
-          status: 'approved',
-          createdAt: { [Op.lt]: thirtyDaysAgo }
+          approval_status: 'approved',
+          created_at: { [Op.lt]: thirtyDaysAgo }
         } 
       }),
       Order.count({ 
         where: { 
-          createdAt: { [Op.lt]: thirtyDaysAgo }
+          created_at: { [Op.lt]: thirtyDaysAgo }
         } 
       }),
-      Order.sum('totalAmount', { 
+      Order.sum('total_amount', { 
         where: { 
-          status: { [Op.in]: ['completed', 'delivered'] },
-          createdAt: { [Op.lt]: thirtyDaysAgo }
+          order_status: { [Op.in]: ['completed', 'delivered'] },
+          created_at: { [Op.lt]: thirtyDaysAgo }
         } 
       })
     ]);
@@ -103,10 +103,9 @@ exports.getDashboardStats = async (req, res, next) => {
  */
 exports.getDashboardOverview = async (req, res, next) => {
   try {
-    // Get pending approvals
     const [pendingSellers, pendingProducts] = await Promise.all([
-      Seller.count({ where: { status: 'pending' } }),
-      Product.count({ where: { status: 'pending' } })
+      Seller.count({ where: { approval_status: 'pending' } }),
+      Product.count({ where: { approval_status: 'pending' } })
     ]);
 
     // Get recent orders (last 7 days)
@@ -122,10 +121,10 @@ exports.getDashboardOverview = async (req, res, next) => {
     // Get revenue by status
     const revenueByStatus = await Order.findAll({
       attributes: [
-        'status',
-        [sequelize.fn('SUM', sequelize.col('totalAmount')), 'total']
+        ['order_status', 'status'],
+        [sequelize.fn('SUM', sequelize.col('total_amount')), 'total']
       ],
-      group: ['status']
+      group: ['order_status']
     });
 
     const overview = {

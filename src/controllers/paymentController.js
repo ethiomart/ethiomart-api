@@ -1,5 +1,5 @@
 const chapaService = require('../services/chapaService');
-const { Order, Payment, User, OrderItem, Analytics, Seller } = require('../models');
+const { Order, Payment, User, OrderItem, Product, Analytics, Seller } = require('../models');
 const sequelize = require('../config/database');
 const securityLogger = require('../utils/securityLogger');
 const paymentMetrics = require('../utils/paymentMonitoring');
@@ -163,7 +163,88 @@ async function initiatePayment(req, res) {
     });
   } catch (error) {
     await transaction.rollback();
-    console.error('Payment initialization error:', error);
+    
+    // ============================================
+    // DETAILED DATABASE VALIDATION ERROR LOGGING
+    // ============================================
+    
+    // Log comprehensive error context
+    console.error('=== PAYMENT INITIALIZATION ERROR ===');
+    console.error('Timestamp:', new Date().toISOString());
+    console.error('Error Type:', error.name);
+    console.error('Error Message:', error.message);
+    console.error('Order ID:', req.body?.orderId);
+    console.error('Amount:', req.body?.amount);
+    console.error('Currency:', req.body?.currency);
+    
+    // Log stack trace for debugging
+    if (error.stack) {
+      console.error('Stack Trace:', error.stack);
+    }
+
+    // Handle database validation errors
+    if (error.name === 'SequelizeValidationError') {
+      const validationErrors = error.errors.map(err => ({
+        field: err.path,
+        message: err.message,
+        value: err.value,
+        type: err.type
+      }));
+      
+      console.error('=== DATABASE VALIDATION ERRORS ===');
+      console.error('Total Validation Errors:', validationErrors.length);
+      validationErrors.forEach((err, index) => {
+        console.error(`\nValidation Error #${index + 1}:`);
+        console.error('  Field:', err.field);
+        console.error('  Message:', err.message);
+        console.error('  Value:', err.value);
+        console.error('  Type:', err.type);
+      });
+      console.error('==================================\n');
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Payment validation failed',
+        errors: validationErrors.map(e => `${e.field}: ${e.message}`)
+      });
+    }
+
+    if (error.name === 'SequelizeForeignKeyConstraintError') {
+      console.error('=== FOREIGN KEY CONSTRAINT ERROR ===');
+      console.error('Table:', error.table);
+      console.error('Fields:', error.fields);
+      console.error('Value:', error.value);
+      console.error('====================================\n');
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid reference in payment data'
+      });
+    }
+
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      console.error('=== UNIQUE CONSTRAINT ERROR ===');
+      console.error('Fields:', error.fields);
+      console.error('Value:', error.value);
+      console.error('===============================\n');
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Duplicate payment record detected'
+      });
+    }
+
+    if (error.name === 'SequelizeDatabaseError') {
+      console.error('=== DATABASE ERROR ===');
+      console.error('SQL:', error.sql);
+      console.error('Parameters:', error.parameters);
+      console.error('======================\n');
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Database error occurred during payment initialization'
+      });
+    }
     
     // Property 5: Error Message Propagation
     // Handle specific error types with appropriate status codes and messages
@@ -215,6 +296,10 @@ async function initiatePayment(req, res) {
     
     // Default server error (500 Internal Server Error)
     // Preserve error context - don't convert to generic message
+    console.error('=== UNEXPECTED ERROR ===');
+    console.error('Error Object:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+    console.error('========================\n');
+    
     res.status(500).json({
       success: false,
       message: 'Failed to initialize payment',
@@ -443,10 +528,10 @@ const handleWebhook = async (req, res) => {
 
             // Update seller analytics for this order
             try {
-              const orderItems = await OrderItem.findAll({ where: { orderId: order.id } });
+              const orderItems = await OrderItem.findAll({ where: { order_id: order.id } });
               for (const item of orderItems) {
-                if (item.sellerId) {
-                  const revenue = item.priceAtPurchase * item.quantity;
+                if (item.seller_id) {
+                  const revenue = item.price_at_purchase * item.quantity;
                   const commission = revenue * 0.1; // Example commission rate
 
                   // Find or create analytics record for current month
@@ -454,7 +539,7 @@ const handleWebhook = async (req, res) => {
                   
                   await Analytics.findOrCreate({
                     where: { 
-                      seller_id: item.sellerId,
+                      seller_id: item.seller_id,
                       period: currentMonth
                     },
                     defaults: {
@@ -473,7 +558,7 @@ const handleWebhook = async (req, res) => {
                   });
                   
                   // Also update Seller total revenue
-                  const seller = await Seller.findByPk(item.sellerId);
+                  const seller = await Seller.findByPk(item.seller_id);
                   if (seller) {
                     await seller.increment({
                       total_revenue: revenue,
@@ -1271,10 +1356,810 @@ const adminVerifyPayment = async (req, res) => {
   }
 };
 
+/**
+ * Handle Chapa callback (Task 7.1)
+ * POST /api/payments/callback
+ * Requirements: Callback URL handling with immediate acknowledgment and async verification
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+const handleCallback = async (req, res) => {
+  const startTime = Date.now();
+  
+  try {
+    const payload = req.body;
+    const { tx_ref, status, amount, currency } = payload;
+
+    // Task 7.2: Extract tx_ref, status, amount, currency from callback payload
+    if (!tx_ref) {
+      console.error('Callback received without tx_ref');
+      // Task 7.4: Respond with HTTP 200 immediately to acknowledge receipt
+      return res.status(200).json({
+        success: true,
+        message: 'Callback received but missing transaction reference'
+      });
+    }
+
+    // Task 7.3: Log callback receipt with timestamp and payload details
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] Callback received: tx_ref=${tx_ref}, status=${status}, amount=${amount}, currency=${currency}`);
+    
+    // Log callback received
+    securityLogger.logWebhookReceived({
+      txRef: tx_ref,
+      status,
+      amount,
+      currency,
+      ip: req.ip,
+      timestamp
+    });
+
+    // Task 7.4: Respond with HTTP 200 immediately to acknowledge receipt
+    res.status(200).json({
+      success: true,
+      message: 'Callback received and processing'
+    });
+
+    // Task 7.5: Implement async verification with Chapa's API
+    // Task 7.6: Update payment record with verified status
+    // Task 7.7: Update order status if payment succeeded
+    // Task 7.8: Handle idempotency (ignore duplicate callbacks for same tx_ref)
+    // Task 7.9: Add error handling for verification failures
+    // Task 7.10: Send confirmation email to customer after successful payment
+    setImmediate(async () => {
+      // Use a transaction with row-level locking to prevent race conditions
+      const transaction = await sequelize.transaction();
+      
+      try {
+        // Task 7.8: Handle idempotency with database-level locking
+        // Find payment by Chapa reference with row-level lock (FOR UPDATE)
+        // This prevents concurrent callbacks from processing the same payment
+        const payment = await Payment.findOne({
+          where: { chapa_tx_ref: tx_ref },
+          include: [{ 
+            model: Order, 
+            as: 'order',
+            include: [{
+              model: User,
+              as: 'user',
+              attributes: ['id', 'email', 'first_name', 'last_name']
+            }]
+          }],
+          lock: transaction.LOCK.UPDATE,
+          transaction
+        });
+
+        if (!payment) {
+          await transaction.rollback();
+          console.error(`Callback processing: Payment not found for tx_ref ${tx_ref}`);
+          return;
+        }
+
+        // Task 7.8: Handle idempotency - check if already processed
+        // If payment is not pending, it has already been processed by a previous callback
+        if (payment.status !== 'pending') {
+          await transaction.rollback();
+          console.log(`Callback processing: Duplicate callback detected for tx_ref ${tx_ref}. Payment ${payment.id} already processed with status ${payment.status}. Ignoring.`);
+          
+          // Log duplicate callback attempt for monitoring
+          securityLogger.logDuplicateCallback({
+            txRef: tx_ref,
+            paymentId: payment.id,
+            currentStatus: payment.status,
+            ip: req.ip,
+            timestamp: new Date().toISOString()
+          });
+          
+          return;
+        }
+
+        // Task 7.5: Verify payment with Chapa's API
+        console.log(`Callback processing: Triggering verification for tx_ref ${tx_ref}`);
+        const verificationResult = await chapaService.verifyPayment(tx_ref);
+
+        // Validate amount and currency match
+        const expectedAmount = parseFloat(payment.amount);
+        const verifiedAmount = parseFloat(verificationResult.amount);
+        const expectedCurrency = payment.currency || 'ETB';
+        const verifiedCurrency = verificationResult.currency || 'ETB';
+
+        if (Math.abs(expectedAmount - verifiedAmount) > 0.01) {
+          console.error(`Callback verification: Amount mismatch for tx_ref ${tx_ref}: expected ${expectedAmount}, got ${verifiedAmount}`);
+          
+          securityLogger.logAmountMismatch({
+            paymentId: payment.id,
+            reference: tx_ref,
+            expectedAmount,
+            receivedAmount: verifiedAmount
+          });
+
+          // Task 7.6: Update payment record with failure
+          payment.status = 'failed';
+          payment.chapa_response = { ...verificationResult, error: 'Amount mismatch' };
+          await payment.save({ transaction });
+          await transaction.commit();
+          return;
+        }
+
+        if (expectedCurrency !== verifiedCurrency) {
+          console.error(`Callback verification: Currency mismatch for tx_ref ${tx_ref}: expected ${expectedCurrency}, got ${verifiedCurrency}`);
+          
+          securityLogger.logCurrencyMismatch({
+            paymentId: payment.id,
+            reference: tx_ref,
+            expectedCurrency,
+            receivedCurrency: verifiedCurrency
+          });
+
+          // Task 7.6: Update payment record with failure
+          payment.status = 'failed';
+          payment.chapa_response = { ...verificationResult, error: 'Currency mismatch' };
+          await payment.save({ transaction });
+          await transaction.commit();
+          return;
+        }
+
+        // Task 7.6: Update payment record with verified status
+        if (verificationResult.status === 'success') {
+          payment.status = 'success';
+          payment.payment_method = verificationResult.paymentMethod;
+          payment.transaction_id = verificationResult.transactionId;
+          payment.chapa_response = verificationResult;
+          payment.paid_at = new Date();
+          await payment.save({ transaction });
+
+          // Task 7.7: Update order status if payment succeeded
+          const order = payment.order;
+          if (order && order.payment_status !== 'paid') {
+            order.payment_status = 'paid';
+            order.order_status = 'confirmed';
+            order.paid_at = new Date();
+            order.payment_method = verificationResult.paymentMethod;
+            await order.save({ transaction });
+
+            // Commit transaction before sending emails and updating analytics
+            // This ensures payment and order status are persisted even if email/analytics fail
+            await transaction.commit();
+
+            // Log payment success
+            securityLogger.logPaymentSuccess({
+              paymentId: payment.id,
+              orderId: order.id,
+              reference: tx_ref,
+              amount: payment.amount,
+              currency: payment.currency,
+              paymentMethod: verificationResult.paymentMethod
+            });
+
+            // Log order confirmation
+            securityLogger.logOrderConfirmation({
+              orderId: order.id,
+              orderNumber: order.order_number,
+              paymentId: payment.id,
+              reference: tx_ref,
+              amount: payment.amount
+            });
+
+            // Task 7.10: Send confirmation email to customer after successful payment
+            try {
+              const emailService = require('../services/emailService');
+              const emailResult = await emailService.sendPaymentConfirmation({
+                email: order.user?.email,
+                firstName: order.user?.first_name,
+                lastName: order.user?.last_name,
+                orderId: order.id,
+                orderNumber: order.order_number,
+                amount: payment.amount,
+                currency: payment.currency,
+                paymentMethod: verificationResult.paymentMethod,
+                reference: tx_ref
+              });
+
+              if (!emailResult.success) {
+                const logger = require('../utils/logger');
+                logger.logEmailFailure({
+                  emailType: 'payment_confirmation',
+                  recipient: order.user?.email,
+                  error: emailResult.error,
+                  orderId: order.id,
+                  paymentId: payment.id
+                });
+              }
+            } catch (emailError) {
+              const logger = require('../utils/logger');
+              logger.logEmailFailure({
+                emailType: 'payment_confirmation',
+                recipient: order.user?.email,
+                error: emailError.message,
+                orderId: order.id,
+                paymentId: payment.id
+              });
+              
+              console.error('Callback processing: Failed to send confirmation email:', emailError.message);
+            }
+
+            // Task 14.4: Update seller analytics with revenue and order count
+            try {
+              const OrderItem = require('../models').OrderItem;
+              const Seller = require('../models').Seller;
+              
+              // Get all order items for this order
+              const orderItems = await OrderItem.findAll({ 
+                where: { order_id: order.id },
+                attributes: ['id', 'seller_id', 'price_at_purchase', 'quantity']
+              });
+              
+              console.log(`Callback processing: Updating analytics for ${orderItems.length} order items`);
+              
+              // Group items by seller to update each seller once per order
+              const sellerRevenue = {};
+              const sellerOrders = new Set();
+              
+              for (const item of orderItems) {
+                if (item.seller_id) {
+                  const revenue = parseFloat(item.price_at_purchase) * item.quantity;
+                  
+                  // Accumulate revenue per seller
+                  if (!sellerRevenue[item.seller_id]) {
+                    sellerRevenue[item.seller_id] = 0;
+                  }
+                  sellerRevenue[item.seller_id] += revenue;
+                  
+                  // Track unique sellers for order count
+                  sellerOrders.add(item.seller_id);
+                }
+              }
+              
+              // Update each seller's analytics
+              for (const sellerId of Object.keys(sellerRevenue)) {
+                const revenue = sellerRevenue[sellerId];
+                
+                const seller = await Seller.findByPk(sellerId);
+                if (seller) {
+                  // Increment total_revenue and total_orders
+                  await seller.increment({
+                    total_revenue: revenue,
+                    total_orders: 1
+                  });
+                  
+                  console.log(`Callback processing: Updated seller ${sellerId} analytics: +${revenue.toFixed(2)} revenue, +1 order`);
+                } else {
+                  console.warn(`Callback processing: Seller ${sellerId} not found for analytics update`);
+                }
+              }
+              
+              console.log(`Callback processing: Successfully updated analytics for ${sellerOrders.size} sellers`);
+            } catch (analyticsError) {
+              console.error('Callback processing: Failed to update seller analytics:', analyticsError.message);
+              console.error(analyticsError.stack);
+            }
+
+            console.log(`Callback processing: Payment verified and order ${order.id} confirmed for tx_ref ${tx_ref}`);
+          } else {
+            // Order already paid, commit transaction and return
+            await transaction.commit();
+            console.log(`Callback processing: Payment verified but order ${order.id} already paid for tx_ref ${tx_ref}`);
+          }
+        } else if (verificationResult.status === 'failed') {
+          // Task 7.6: Update payment record with failure
+          payment.status = 'failed';
+          payment.chapa_response = verificationResult;
+          await payment.save({ transaction });
+
+          // Task 7.7: Update order status
+          const order = payment.order;
+          if (order && order.payment_status !== 'failed') {
+            order.payment_status = 'failed';
+            order.order_status = 'pending';
+            await order.save({ transaction });
+          }
+
+          // Commit transaction before logging
+          await transaction.commit();
+
+          // Log payment failure
+          securityLogger.logPaymentFailure({
+            paymentId: payment.id,
+            orderId: order?.id,
+            reference: tx_ref,
+            amount: payment.amount,
+            reason: verificationResult.message || 'Payment failed'
+          });
+
+          console.log(`Callback processing: Payment verification failed for tx_ref ${tx_ref}`);
+        } else {
+          // Unknown status, rollback transaction
+          await transaction.rollback();
+          console.log(`Callback processing: Unknown verification status for tx_ref ${tx_ref}: ${verificationResult.status}`);
+        }
+
+        // Record metrics
+        const duration = Date.now() - startTime;
+        paymentMetrics.recordWebhookDelivery(true, { txRef: tx_ref });
+        paymentMetrics.recordResponseTime(duration, 'callback');
+      } catch (verifyError) {
+        // Task 7.9: Add error handling for verification failures
+        // Rollback transaction on error
+        if (transaction && !transaction.finished) {
+          await transaction.rollback();
+        }
+        
+        // Determine error type and severity
+        const errorType = verifyError.name || 'UnknownError';
+        const errorMessage = verifyError.message || 'Unknown error occurred';
+        const isNetworkError = errorType === 'NetworkError' || errorMessage.includes('ECONNREFUSED') || errorMessage.includes('ETIMEDOUT');
+        const isTimeoutError = errorType === 'TimeoutError' || errorMessage.includes('timeout');
+        const isValidationError = errorType === 'ValidationError' || errorMessage.includes('validation');
+        
+        // Log detailed error information
+        console.error(`Callback processing: Async verification failed for tx_ref ${tx_ref}`);
+        console.error(`Error Type: ${errorType}`);
+        console.error(`Error Message: ${errorMessage}`);
+        console.error(`Stack Trace:`, verifyError.stack);
+        
+        // Log to security logger with error details
+        securityLogger.logVerificationFailure({
+          txRef: tx_ref,
+          errorType,
+          errorMessage,
+          isNetworkError,
+          isTimeoutError,
+          isValidationError,
+          timestamp: new Date().toISOString(),
+          stackTrace: verifyError.stack
+        });
+        
+        // Record failure metrics with detailed reason
+        paymentMetrics.recordWebhookDelivery(false, { 
+          txRef: tx_ref, 
+          reason: errorMessage,
+          errorType,
+          isRetryable: isNetworkError || isTimeoutError
+        });
+        
+        // Attempt to update payment record with error status
+        try {
+          const failedPayment = await Payment.findOne({
+            where: { chapa_tx_ref: tx_ref }
+          });
+          
+          if (failedPayment && failedPayment.status === 'pending') {
+            // Mark payment as verification_failed for manual review
+            failedPayment.status = 'verification_failed';
+            failedPayment.chapa_response = {
+              error: errorMessage,
+              errorType,
+              timestamp: new Date().toISOString(),
+              requiresManualReview: true
+            };
+            await failedPayment.save();
+            
+            console.log(`Callback processing: Payment ${failedPayment.id} marked as verification_failed for manual review`);
+            
+            // Log for admin notification
+            securityLogger.logManualReviewRequired({
+              paymentId: failedPayment.id,
+              txRef: tx_ref,
+              reason: 'Verification failed during callback processing',
+              errorMessage
+            });
+          }
+        } catch (updateError) {
+          console.error(`Callback processing: Failed to update payment record after verification error:`, updateError.message);
+          
+          // Log critical error - payment is in inconsistent state
+          securityLogger.logCriticalError({
+            context: 'callback_verification_failure',
+            txRef: tx_ref,
+            originalError: errorMessage,
+            updateError: updateError.message,
+            requiresUrgentAttention: true
+          });
+        }
+        
+        // If network or timeout error, log for retry consideration
+        if (isNetworkError || isTimeoutError) {
+          console.log(`Callback processing: Transient error detected for tx_ref ${tx_ref}. Payment may be retried by Chapa.`);
+          
+          securityLogger.logRetryableError({
+            txRef: tx_ref,
+            errorType,
+            errorMessage,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Callback processing error:', error);
+    
+    // Still acknowledge receipt even on error
+    if (!res.headersSent) {
+      res.status(200).json({
+        success: true,
+        message: 'Callback received with errors',
+        error: error.message
+      });
+    }
+  }
+};
+/**
+ * Handle Chapa return URL
+ * GET /api/payments/return
+ * Requirements: Return URL handling with HTML response for Flutter WebView
+ * Task 9.1: Create handleReturn function
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+const handleReturn = async (req, res) => {
+  try {
+    // Task 9.2: Parse query parameters (tx_ref, status) from return URL
+    const { tx_ref, status } = req.query;
+
+    // Task 9.5: Log return URL access with tx_ref and status
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] Return URL accessed: tx_ref=${tx_ref}, status=${status}`);
+
+    // Log return URL access (commented out - method not implemented in securityLogger yet)
+    // securityLogger.logReturnUrlAccess({
+    //   txRef: tx_ref,
+    //   status,
+    //   ip: req.ip,
+    //   timestamp,
+    //   userAgent: req.headers['user-agent']
+    // });
+
+    // Task 9.3: Return HTML page that signals Flutter WebView to close
+    // Task 9.4: Add JavaScript to post message to Flutter WebView
+    const htmlResponse = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Payment Processing</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      text-align: center;
+    }
+    .container {
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 20px;
+      padding: 40px;
+      box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+      max-width: 400px;
+    }
+    .icon {
+      font-size: 64px;
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 24px;
+      margin: 0 0 10px 0;
+      font-weight: 600;
+    }
+    p {
+      font-size: 16px;
+      margin: 0 0 20px 0;
+      opacity: 0.9;
+    }
+    .spinner {
+      border: 3px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top: 3px solid white;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+      margin: 20px auto;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .reference {
+      font-size: 12px;
+      opacity: 0.7;
+      margin-top: 20px;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">✓</div>
+    <h1>Payment Processing</h1>
+    <p>Please wait while we verify your payment...</p>
+    <div class="spinner"></div>
+    ${tx_ref ? `<div class="reference">Reference: ${tx_ref}</div>` : ''}
+  </div>
+
+  <script>
+    // Task 9.4: Post message to Flutter WebView to signal closure
+    (function() {
+      const txRef = '${tx_ref || ''}';
+      const status = '${status || 'unknown'}';
+
+      console.log('Return URL page loaded:', { txRef, status });
+
+      // Method 1: Use JavaScript channel for webview_flutter package
+      if (window.PaymentReturn) {
+        console.log('Posting message to PaymentReturn channel');
+        window.PaymentReturn.postMessage('tx_ref:' + txRef + ',status:' + status);
+      }
+
+      // Method 2: Post message to Flutter WebView using flutter_inappwebview
+      if (window.flutter_inappwebview) {
+        console.log('Calling flutter_inappwebview handler');
+        window.flutter_inappwebview.callHandler('paymentReturn', {
+          tx_ref: txRef,
+          status: status,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Method 3: Try postMessage for webview_flutter package (alternative)
+      if (window.parent) {
+        console.log('Posting message to parent window');
+        window.parent.postMessage({
+          type: 'PAYMENT_RETURN',
+          tx_ref: txRef,
+          status: status,
+          timestamp: new Date().toISOString()
+        }, '*');
+      }
+
+      // Fallback: Try to close the window after a short delay
+      setTimeout(function() {
+        console.log('Attempting to close window...');
+
+        // Try multiple methods to signal completion
+        if (window.close) {
+          window.close();
+        }
+
+        // Signal to any parent frame
+        if (window.parent !== window) {
+          window.parent.postMessage('CLOSE_WEBVIEW', '*');
+        }
+
+        // Update UI to show manual close instruction
+        document.querySelector('.container').innerHTML =
+          '<div class="icon">✓</div>' +
+          '<h1>Payment Received</h1>' +
+          '<p>You can now close this window and return to the app.</p>' +
+          (txRef ? '<div class="reference">Reference: ' + txRef + '</div>' : '');
+      }, 2000);
+    })();
+  </script>
+</body>
+</html>
+    `;
+
+    // Task 9.6: Test return URL handler returns proper HTML response
+    res.setHeader('Content-Type', 'text/html');
+    res.status(200).send(htmlResponse);
+  } catch (error) {
+    console.error('Return URL processing error:', error);
+
+    // Return error page
+    const errorHtml = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Payment Error</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      color: white;
+      text-align: center;
+    }
+    .container {
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 20px;
+      padding: 40px;
+      box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+      max-width: 400px;
+    }
+    .icon {
+      font-size: 64px;
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 24px;
+      margin: 0 0 10px 0;
+      font-weight: 600;
+    }
+    p {
+      font-size: 16px;
+      margin: 0;
+      opacity: 0.9;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">⚠</div>
+    <h1>Processing Error</h1>
+    <p>An error occurred while processing your payment return. Please contact support if needed.</p>
+  </div>
+  <script>
+    // Still try to close the window
+    setTimeout(function() {
+      if (window.close) window.close();
+      if (window.parent !== window) {
+        window.parent.postMessage('CLOSE_WEBVIEW', '*');
+      }
+    }, 3000);
+  </script>
+</body>
+</html>
+    `;
+
+    res.setHeader('Content-Type', 'text/html');
+    res.status(500).send(errorHtml);
+  }
+};
+
+/**
+ * Get payment status by transaction reference
+ * GET /api/payments/status/:tx_ref
+ * Requirements: 11.1, 11.2, 11.3, 11.4
+ * Task 11.1: Create getPaymentStatus function
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+const getPaymentStatus = async (req, res) => {
+  try {
+    // Task 11.2: Accept tx_ref as parameter
+    const { tx_ref } = req.params;
+
+    if (!tx_ref) {
+      return res.status(400).json({
+        success: false,
+        message: 'Transaction reference is required'
+      });
+    }
+
+    // Task 11.3: Query payment record by tx_ref with comprehensive order details
+    const payment = await Payment.findOne({
+      where: { chapa_tx_ref: tx_ref },
+      include: [{
+        model: Order,
+        as: 'order',
+        attributes: [
+          'id', 'order_number', 'subtotal', 'shipping_cost', 'tax_amount', 
+          'discount_amount', 'total_amount', 'order_status', 'payment_status', 
+          'payment_method', 'shipping_address', 'notes', 'tracking_number', 
+          'carrier', 'estimated_delivery_date', 'paid_at', 'delivered_at', 
+          'created_at', 'updated_at'
+        ],
+        include: [
+          {
+            model: User,
+            as: 'user',
+            attributes: ['id', 'email', 'first_name', 'last_name', 'phone']
+          },
+          {
+            model: OrderItem,
+            as: 'items',
+            attributes: ['id', 'quantity', 'price_at_purchase', 'status'],
+            include: [{
+              model: Product,
+              as: 'product',
+              attributes: ['id', 'name', 'description', 'images', 'sku']
+            }]
+          }
+        ]
+      }]
+    });
+
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment not found',
+        error: `No payment found for transaction reference: ${tx_ref}`
+      });
+    }
+
+    // Task 11.4: Return payment status, amount, and comprehensive order details
+    res.status(200).json({
+      success: true,
+      message: 'Payment status retrieved successfully',
+      data: {
+        payment: {
+          id: payment.id,
+          status: payment.status,
+          amount: payment.amount.toString(),
+          currency: payment.currency,
+          paymentMethod: payment.payment_method,
+          transactionId: payment.transaction_id,
+          chapaReference: payment.chapa_tx_ref,
+          paidAt: payment.paid_at,
+          createdAt: payment.created_at,
+          updatedAt: payment.updated_at
+        },
+        order: payment.order ? {
+          id: payment.order.id,
+          orderNumber: payment.order.order_number,
+          subtotal: payment.order.subtotal?.toString(),
+          shippingCost: payment.order.shipping_cost?.toString(),
+          taxAmount: payment.order.tax_amount?.toString(),
+          discountAmount: payment.order.discount_amount?.toString(),
+          totalAmount: payment.order.total_amount.toString(),
+          orderStatus: payment.order.order_status,
+          paymentStatus: payment.order.payment_status,
+          paymentMethod: payment.order.payment_method,
+          notes: payment.order.notes,
+          trackingNumber: payment.order.tracking_number,
+          carrier: payment.order.carrier,
+          estimatedDeliveryDate: payment.order.estimated_delivery_date,
+          paidAt: payment.order.paid_at,
+          deliveredAt: payment.order.delivered_at,
+          createdAt: payment.order.created_at,
+          updatedAt: payment.order.updated_at,
+          customer: {
+            id: payment.order.user?.id,
+            email: payment.order.user?.email,
+            firstName: payment.order.user?.first_name,
+            lastName: payment.order.user?.last_name,
+            phone: payment.order.user?.phone
+          },
+          shippingAddress: payment.order.shipping_address,
+          items: payment.order.items?.map(item => ({
+            id: item.id,
+            quantity: item.quantity,
+            priceAtPurchase: item.price_at_purchase?.toString(),
+            status: item.status,
+            product: item.product ? {
+              id: item.product.id,
+              name: item.product.name,
+              description: item.product.description,
+              images: item.product.images,
+              sku: item.product.sku
+            } : null
+          })) || []
+        } : null
+      }
+    });
+  } catch (error) {
+    console.error('Get payment status error:', error);
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve payment status',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   initiatePayment,
   handleWebhook,
+  handleCallback,
+  handleReturn,
   verifyPayment,
+  getPaymentStatus,
   getPaymentHistory,
   adminVerifyPayment
 };

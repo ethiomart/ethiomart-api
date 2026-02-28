@@ -37,6 +37,16 @@ const OrderItem = sequelize.define('OrderItem', {
     onDelete: 'RESTRICT',
     onUpdate: 'CASCADE'
   },
+  variant_combination_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: 'variant_combinations',
+      key: 'id'
+    },
+    onDelete: 'SET NULL',
+    onUpdate: 'CASCADE'
+  },
   quantity: {
     type: DataTypes.INTEGER,
     allowNull: false,

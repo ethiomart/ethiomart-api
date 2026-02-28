@@ -14,7 +14,7 @@ const Order = sequelize.define('Order', {
   },
   user_id: {
     type: DataTypes.INTEGER,
-    allowNull: false,
+    allowNull: true,
     references: {
       model: 'users',
       key: 'id'
@@ -25,6 +25,22 @@ const Order = sequelize.define('Order', {
   address_id: {
     type: DataTypes.INTEGER,
     allowNull: true
+  },
+  shipping_address: {
+    type: DataTypes.JSON,
+    allowNull: true,
+    comment: 'Snapshot of shipping address at order time for historical record keeping',
+    validate: {
+      isValidAddress(value) {
+        if (value) {
+          const requiredFields = ['full_name', 'phone', 'street_address', 'city', 'country'];
+          const missingFields = requiredFields.filter(field => !value[field]);
+          if (missingFields.length > 0) {
+            throw new Error(`Missing required address fields: ${missingFields.join(', ')}`);
+          }
+        }
+      }
+    }
   },
   subtotal: {
     type: DataTypes.DECIMAL(10, 2),
@@ -64,7 +80,7 @@ const Order = sequelize.define('Order', {
     defaultValue: 'pending'
   },
   order_status: {
-    type: DataTypes.ENUM('pending', 'confirmed', 'processing', 'packed', 'shipped', 'in_transit', 'out_for_delivery', 'delivered', 'cancelled', 'returned'),
+    type: DataTypes.ENUM('pending', 'confirmed', 'processing', 'shipped', 'out_for_delivery', 'delivered', 'cancelled', 'returned'),
     allowNull: false,
     defaultValue: 'pending'
   },

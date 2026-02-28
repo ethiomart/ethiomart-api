@@ -1,5 +1,6 @@
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/database');
+const { slugify } = require('../utils/helpers');
 
 const Brand = sequelize.define('Brand', {
   id: {
@@ -13,7 +14,7 @@ const Brand = sequelize.define('Brand', {
   },
   slug: {
     type: DataTypes.STRING(100),
-    allowNull: false,
+    allowNull: true, // Allow null during validation so hook can fill it
     unique: true
   },
   logo: {
@@ -31,7 +32,14 @@ const Brand = sequelize.define('Brand', {
 }, {
   tableName: 'brands',
   timestamps: true,
-  underscored: true
+  underscored: true,
+  hooks: {
+    beforeValidate: (brand) => {
+      if (brand.name && !brand.slug) {
+        brand.slug = slugify(brand.name);
+      }
+    }
+  }
 });
 
 module.exports = Brand;

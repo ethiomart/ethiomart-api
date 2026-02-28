@@ -142,12 +142,12 @@ const getCart = async (req, res, next) => {
       data: {
         cart: {
           id: cart.id,
-          userId: cart.userId,
+          user_id: cart.user_id || cart.userId,
           items: formattedItems,
           total: parseFloat(total.toFixed(2)),
-          itemCount: validItems.length,
-          createdAt: cart.created_at || cart.createdAt,
-          updatedAt: cart.updated_at || cart.updatedAt
+          item_count: validItems.length,
+          created_at: cart.created_at || cart.createdAt,
+          updated_at: cart.updated_at || cart.updatedAt
         }
       }
     });
@@ -432,12 +432,12 @@ const addToCart = async (req, res, next) => {
       message: message,
       data: {
         id: updatedCart.id,
-        userId: updatedCart.userId,
+        user_id: updatedCart.user_id || updatedCart.userId,
         items: formattedItems,
         total: parseFloat(total.toFixed(2)),
-        itemCount: validItems.length,
-        createdAt: updatedCart.created_at || updatedCart.createdAt,
-        updatedAt: updatedCart.updated_at || updatedCart.updatedAt
+        item_count: validItems.length,
+        created_at: updatedCart.created_at || updatedCart.createdAt,
+        updated_at: updatedCart.updated_at || updatedCart.updatedAt
       }
     });
   } catch (error) {
@@ -700,7 +700,7 @@ const clearCart = async (req, res, next) => {
 
     // Delete all cart items
     await CartItem.destroy({
-      where: { cartId: cart.id }
+      where: { cart_id: cart.id }
     });
 
     res.status(200).json({

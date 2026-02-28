@@ -4,39 +4,8 @@ const Category = require('../models/Category');
 const User = require('../models/User');
 const { Op } = require('sequelize');
 const sequelize = require('../config/database');
+const { transformImageUrls } = require('../utils/imageUtils');
 
-/**
- * Transform relative image URLs to absolute URLs
- * @param {Object} req - Express request object
- * @param {Array|string} images - Image URL(s) to transform
- * @returns {Array|string} Transformed image URL(s)
- */
-const transformImageUrls = (req, images) => {
-  if (!images) return images;
-  
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
-  
-  const transformUrl = (url) => {
-    if (!url) return url;
-    // Skip URLs that are already absolute
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      return url;
-    }
-    // Transform relative URLs starting with /uploads/
-    if (url.startsWith('/uploads/')) {
-      return `${baseUrl}${url}`;
-    }
-    return url;
-  };
-  
-  // Handle array of images
-  if (Array.isArray(images)) {
-    return images.map(transformUrl);
-  }
-  
-  // Handle single image string
-  return transformUrl(images);
-};
 
 /**
  * Create a new product
@@ -101,7 +70,7 @@ const createProduct = async (req, res, next) => {
     }
 
     // Get seller profile
-    const seller = await Seller.findOne({ where: { userId } });
+    const seller = await Seller.findOne({ where: { user_id: userId } });
     if (!seller) {
       return res.status(404).json({
         success: false,
@@ -283,6 +252,25 @@ const getProductById = async (req, res, next) => {
           model: Category,
           as: 'category',
           attributes: ['id', 'name', 'description', 'parent_id']
+        },
+        {
+          model: require('../models/VariantOption'),
+          as: 'variantOptions',
+          include: [{
+            model: require('../models/VariantValue'),
+            as: 'values',
+            attributes: ['id', 'value_name', 'value_position']
+          }]
+        },
+        {
+          model: require('../models/VariantCombination'),
+          as: 'variantCombinations',
+          include: [{
+            model: require('../models/VariantValue'),
+            as: 'variantValues',
+            attributes: ['id', 'value_name'],
+            through: { attributes: [] }
+          }]
         }
       ]
     });
@@ -320,7 +308,8 @@ const getProductById = async (req, res, next) => {
 const updateProduct = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, description, price, stock, categoryId, isActive, is_published } = req.body;
+    const { name, description, price, stock, category_id, categoryId, isActive, is_published } = req.body;
+    const finalCategoryId = categoryId || category_id;
     const userId = req.user.id;
     const userRole = req.user.role;
 
@@ -342,7 +331,8 @@ const updateProduct = async (req, res, next) => {
     }
 
     // Authorization check: only product owner or admin can update
-    if (userRole !== 'admin' && product.seller.userId !== userId) {
+    const sellerUserId = product.seller ? product.seller.user_id : null;
+    if (userRole !== 'admin' && sellerUserId !== userId) {
       return res.status(403).json({
         success: false,
         message: 'You are not authorized to update this product'
@@ -350,8 +340,8 @@ const updateProduct = async (req, res, next) => {
     }
 
     // Verify category exists if being updated
-    if (categoryId !== undefined && categoryId !== null) {
-      const category = await Category.findByPk(categoryId);
+    if (finalCategoryId !== undefined && finalCategoryId !== null) {
+      const category = await Category.findByPk(finalCategoryId);
       if (!category) {
         return res.status(404).json({
           success: false,
@@ -373,7 +363,7 @@ const updateProduct = async (req, res, next) => {
     if (description !== undefined) updateData.description = description;
     if (price !== undefined) updateData.price = price;
     if (stock !== undefined) updateData.quantity = stock;
-    if (categoryId !== undefined) updateData.category_id = categoryId;
+    if (finalCategoryId !== undefined) updateData.category_id = finalCategoryId;
     if (isActive !== undefined) updateData.is_published = isActive === 'true' || isActive === true;
     if (is_published !== undefined) updateData.is_published = is_published === 'true' || is_published === true;
     if (req.files && req.files.length > 0) updateData.images = images;
@@ -437,7 +427,8 @@ const deleteProduct = async (req, res, next) => {
     }
 
     // Authorization check: only product owner or admin can delete
-    if (userRole !== 'admin' && product.seller.userId !== userId) {
+    const sellerUserId = product.seller ? product.seller.user_id : null;
+    if (userRole !== 'admin' && sellerUserId !== userId) {
       return res.status(403).json({
         success: false,
         message: 'You are not authorized to delete this product'

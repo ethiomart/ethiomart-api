@@ -13,7 +13,7 @@ const sequelize = require('../config/database');
 const updateProductStats = async (productId) => {
   try {
     const stats = await Review.findOne({
-      where: { productId },
+      where: { product_id: productId },
       attributes: [
         [sequelize.fn('COUNT', sequelize.col('id')), 'count'],
         [sequelize.fn('AVG', sequelize.col('rating')), 'average']
@@ -62,13 +62,13 @@ const createReview = async (req, res, next) => {
           model: Order,
           as: 'order',
           where: {
-            userId,
+            user_id: userId,
             order_status: { [Op.in]: ['paid', 'processing', 'shipped', 'delivered'] }
           }
         }
       ],
       where: {
-        productId
+        product_id: productId
       }
     });
 
@@ -82,8 +82,8 @@ const createReview = async (req, res, next) => {
     // Check if user has already reviewed this product
     const existingReview = await Review.findOne({
       where: {
-        productId,
-        userId
+        product_id: productId,
+        user_id: userId
       }
     });
 
@@ -96,8 +96,8 @@ const createReview = async (req, res, next) => {
 
     // Create review
     const review = await Review.create({
-      productId,
-      userId,
+      product_id: productId,
+      user_id: userId,
       rating,
       comment
     });
@@ -153,7 +153,7 @@ const getProductReviews = async (req, res, next) => {
     // Fetch reviews with user details
     const { count, rows: reviews } = await Review.findAndCountAll({
       where: {
-        productId
+        product_id: productId
       },
       include: [
         {
@@ -169,7 +169,7 @@ const getProductReviews = async (req, res, next) => {
 
     // Calculate average rating
     const allReviews = await Review.findAll({
-      where: { productId },
+      where: { product_id: productId },
       attributes: ['rating']
     });
 
@@ -218,7 +218,7 @@ const updateReview = async (req, res, next) => {
     }
 
     // Authorization check: only review owner can update
-    if (review.userId !== userId) {
+    if (review.user_id !== userId) {
       return res.status(403).json({
         success: false,
         message: 'You are not authorized to update this review'
@@ -244,7 +244,7 @@ const updateReview = async (req, res, next) => {
     });
 
     // Update product stats (async)
-    updateProductStats(review.productId);
+    updateProductStats(review.product_id);
 
     res.status(200).json({
       success: true,
@@ -278,18 +278,18 @@ const deleteReview = async (req, res, next) => {
     }
 
     // Authorization check: only review owner can delete
-    if (review.userId !== userId) {
+    if (review.user_id !== userId) {
       return res.status(403).json({
         success: false,
         message: 'You are not authorized to delete this review'
       });
     }
 
-    const productId = review.productId;
+    const productIdFromReview = review.product_id;
     await review.destroy();
 
     // Update product stats (async)
-    updateProductStats(productId);
+    updateProductStats(productIdFromReview);
 
     res.status(200).json({
       success: true,

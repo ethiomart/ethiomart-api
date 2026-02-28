@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const Seller = require('../models/Seller');
 const { verifyRefreshToken } = require('../utils/tokenUtils');
+const { transformImageUrls } = require('../utils/imageUtils');
 
 // Store for invalidated refresh tokens (in production, use Redis or database)
 const invalidatedTokens = new Set();
@@ -286,7 +287,7 @@ const getProfile = async (req, res, next) => {
           lastName: user.last_name,
           phoneNumber: user.phone, // Map phone back to phoneNumber
           role: user.role,
-          profilePictureUrl: user.profile_picture_url,
+          profilePictureUrl: transformImageUrls(req, user.profile_picture_url),
           isActive: user.is_active,
           createdAt: user.created_at,
           updatedAt: user.updated_at
@@ -306,15 +307,22 @@ const getProfile = async (req, res, next) => {
 const registerSeller = async (req, res, next) => {
   try {
     const { 
-      businessName, 
+      businessName,
+      storeName,
       businessDescription,
+      description,
       businessAddress, 
       businessPhone, 
+      businessEmail,
       taxId,
       accountNumber,
       bankName,
       accountHolder
     } = req.body;
+
+    const finalStoreName = businessName || storeName;
+    const finalDescription = businessDescription || description;
+    const finalBusinessEmail = businessEmail || req.user.email;
     
     // User is attached to req by verifyToken middleware
     if (!req.user) {
@@ -335,12 +343,21 @@ const registerSeller = async (req, res, next) => {
         message: 'Seller account already exists'
       });
     }
-    
+
     // Generate store slug from business name
-    const storeSlug = businessName
+    const storeSlug = finalStoreName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '');
+
+    // Check if store name/slug is already taken
+    const slugConflict = await Seller.findOne({ where: { store_slug: storeSlug } });
+    if (slugConflict) {
+      return res.status(400).json({
+        success: false,
+        message: 'A store with this name already exists. Please choose a different name.'
+      });
+    }
     
     // Handle file uploads
     let businessLicenseUrl = null;
@@ -358,17 +375,18 @@ const registerSeller = async (req, res, next) => {
     // Create seller account with all fields
     const seller = await Seller.create({
       user_id: req.user.id,
-      store_name: businessName,
+      store_name: finalStoreName,
       store_slug: storeSlug,
-      description: businessDescription,
+      store_description: finalDescription,
       business_address: businessAddress,
       business_phone: businessPhone,
+      business_email: finalBusinessEmail,
       tax_id: taxId || null,
       business_license_url: businessLicenseUrl,
       verification_doc_url: verificationDocUrl,
-      account_number: accountNumber,
+      bank_account_number: accountNumber,
       bank_name: bankName,
-      account_holder: accountHolder,
+      bank_account_name: accountHolder,
       approval_status: 'pending'
     });
     
@@ -380,28 +398,21 @@ const registerSeller = async (req, res, next) => {
           id: seller.id,
           storeName: seller.store_name,
           storeSlug: seller.store_slug,
-          description: seller.description,
+          description: seller.store_description,
           businessAddress: seller.business_address,
           businessPhone: seller.business_phone,
           taxId: seller.tax_id,
           businessLicenseUrl: seller.business_license_url,
           verificationDocUrl: seller.verification_doc_url,
-          accountNumber: seller.account_number,
+          accountNumber: seller.bank_account_number,
           bankName: seller.bank_name,
-          accountHolder: seller.account_holder,
+          accountHolder: seller.bank_account_name,
           approvalStatus: seller.approval_status,
           createdAt: seller.created_at
         }
       }
     });
   } catch (error) {
-    // Handle unique constraint violation for store_slug
-    if (error.name === 'SequelizeUniqueConstraintError') {
-      return res.status(400).json({
-        success: false,
-        message: 'A store with a similar name already exists. Please choose a different name.'
-      });
-    }
     next(error);
   }
 };

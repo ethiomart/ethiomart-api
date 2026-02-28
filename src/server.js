@@ -169,6 +169,143 @@ async function startServer() {
     console.log('Validating payment configuration...');
     validatePaymentConfig();
     
+    // Validate Chapa callback and return URLs
+    console.log('Validating Chapa URLs...');
+    const callbackUrl = process.env.CHAPA_CALLBACK_URL;
+    const returnUrl = process.env.CHAPA_RETURN_URL;
+    
+    // Check if CHAPA_CALLBACK_URL is configured
+    if (!callbackUrl || callbackUrl.trim() === '') {
+      throw new Error(
+        'CHAPA_CALLBACK_URL is not configured. ' +
+        'Please set it in your .env file. ' +
+        'Example: CHAPA_CALLBACK_URL=https://yourdomain.com/api/payments/callback'
+      );
+    }
+    
+    // Check if CHAPA_RETURN_URL is configured
+    if (!returnUrl || returnUrl.trim() === '') {
+      throw new Error(
+        'CHAPA_RETURN_URL is not configured. ' +
+        'Please set it in your .env file. ' +
+        'Example: CHAPA_RETURN_URL=https://yourdomain.com/api/payments/return'
+      );
+    }
+    
+    // Validate CHAPA_CALLBACK_URL format
+    try {
+      const callbackUrlObj = new URL(callbackUrl);
+      
+      // Check protocol
+      if (!['http:', 'https:'].includes(callbackUrlObj.protocol)) {
+        throw new Error(
+          `CHAPA_CALLBACK_URL has invalid protocol '${callbackUrlObj.protocol}'. ` +
+          'URL must start with http:// or https://. ' +
+          `Current value: '${callbackUrl}'. ` +
+          'Example: https://yourdomain.com/api/payments/callback'
+        );
+      }
+      
+      // Check HTTPS in production
+      if (config.nodeEnv === 'production' && callbackUrlObj.protocol !== 'https:') {
+        throw new Error(
+          'CHAPA_CALLBACK_URL must use HTTPS in production environment. ' +
+          `Current URL: ${callbackUrl}. ` +
+          'Please update your .env file to use HTTPS. ' +
+          'Example: CHAPA_CALLBACK_URL=https://yourdomain.com/api/payments/callback'
+        );
+      }
+      
+      // Check hostname is not empty and is a valid domain
+      if (!callbackUrlObj.hostname || callbackUrlObj.hostname === '') {
+        throw new Error(
+          'CHAPA_CALLBACK_URL has no hostname. ' +
+          `Current value: '${callbackUrl}'. ` +
+          'URL must include a valid domain name. ' +
+          'Example: https://yourdomain.com/api/payments/callback'
+        );
+      }
+      
+      // Check hostname contains a dot (basic domain validation)
+      if (!callbackUrlObj.hostname.includes('.') && callbackUrlObj.hostname !== 'localhost') {
+        throw new Error(
+          'CHAPA_CALLBACK_URL has invalid hostname. ' +
+          `Current hostname: '${callbackUrlObj.hostname}'. ` +
+          'Hostname must be a valid domain name (e.g., yourdomain.com) or localhost. ' +
+          'Example: https://yourdomain.com/api/payments/callback'
+        );
+      }
+      
+      console.log(`✓ CHAPA_CALLBACK_URL: ${callbackUrl}`);
+    } catch (error) {
+      if (error.message.startsWith('CHAPA_CALLBACK_URL')) {
+        throw error; // Re-throw our custom errors
+      }
+      throw new Error(
+        `CHAPA_CALLBACK_URL is malformed: ${error.message}. ` +
+        `Current value: '${callbackUrl}'. ` +
+        'Please provide a valid absolute URL with a proper domain name. ' +
+        'Example: https://yourdomain.com/api/payments/callback'
+      );
+    }
+    
+    // Validate CHAPA_RETURN_URL format
+    try {
+      const returnUrlObj = new URL(returnUrl);
+      
+      // Check protocol
+      if (!['http:', 'https:'].includes(returnUrlObj.protocol)) {
+        throw new Error(
+          `CHAPA_RETURN_URL has invalid protocol '${returnUrlObj.protocol}'. ` +
+          'URL must start with http:// or https://. ' +
+          `Current value: '${returnUrl}'. ` +
+          'Example: https://yourdomain.com/api/payments/return'
+        );
+      }
+      
+      // Check HTTPS in production
+      if (config.nodeEnv === 'production' && returnUrlObj.protocol !== 'https:') {
+        throw new Error(
+          'CHAPA_RETURN_URL must use HTTPS in production environment. ' +
+          `Current URL: ${returnUrl}. ` +
+          'Please update your .env file to use HTTPS. ' +
+          'Example: CHAPA_RETURN_URL=https://yourdomain.com/api/payments/return'
+        );
+      }
+      
+      // Check hostname is not empty and is a valid domain
+      if (!returnUrlObj.hostname || returnUrlObj.hostname === '') {
+        throw new Error(
+          'CHAPA_RETURN_URL has no hostname. ' +
+          `Current value: '${returnUrl}'. ` +
+          'URL must include a valid domain name. ' +
+          'Example: https://yourdomain.com/api/payments/return'
+        );
+      }
+      
+      // Check hostname contains a dot (basic domain validation)
+      if (!returnUrlObj.hostname.includes('.') && returnUrlObj.hostname !== 'localhost') {
+        throw new Error(
+          'CHAPA_RETURN_URL has invalid hostname. ' +
+          `Current hostname: '${returnUrlObj.hostname}'. ` +
+          'Hostname must be a valid domain name (e.g., yourdomain.com) or localhost. ' +
+          'Example: https://yourdomain.com/api/payments/return'
+        );
+      }
+      
+      console.log(`✓ CHAPA_RETURN_URL: ${returnUrl}`);
+    } catch (error) {
+      if (error.message.startsWith('CHAPA_RETURN_URL')) {
+        throw error; // Re-throw our custom errors
+      }
+      throw new Error(
+        `CHAPA_RETURN_URL is malformed: ${error.message}. ` +
+        `Current value: '${returnUrl}'. ` +
+        'Please provide a valid absolute URL with a proper domain name. ' +
+        'Example: https://yourdomain.com/api/payments/return'
+      );
+    }
+    
     // Sync database models
     console.log('Synchronizing database models...');
     const syncOptions = { alter: false }; // Don't modify schema to avoid datetime issues
@@ -184,6 +321,10 @@ async function startServer() {
       console.log(`✓ API URL: http://localhost:${PORT}`);
       console.log(`✓ Local Network: http://192.168.100.105:${PORT}`);
       console.log(`✓ Rate Limiting: Unauthenticated (${unauthMaxRequests}/15min), Authenticated (${authMaxRequests}/15min)`);
+      console.log('\n=== Chapa Payment Configuration ===');
+      console.log(`Callback URL: ${callbackUrl}`);
+      console.log(`Return URL: ${returnUrl}`);
+      console.log('===================================\n');
     });
   } catch (error) {
     console.error('Failed to start server:', error.message);

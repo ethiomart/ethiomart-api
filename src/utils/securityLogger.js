@@ -31,7 +31,8 @@ const EVENT_TYPES = {
   PAYMENT_SUCCESS: 'PAYMENT_SUCCESS',
   PAYMENT_FAILURE: 'PAYMENT_FAILURE',
   ORDER_CONFIRMATION: 'ORDER_CONFIRMATION',
-  DUPLICATE_PAYMENT_ATTEMPT: 'DUPLICATE_PAYMENT_ATTEMPT'
+  DUPLICATE_PAYMENT_ATTEMPT: 'DUPLICATE_PAYMENT_ATTEMPT',
+  DUPLICATE_CALLBACK: 'DUPLICATE_CALLBACK'
 };
 
 /**
@@ -400,6 +401,25 @@ function logDuplicatePaymentAttempt(data) {
   );
 }
 
+/**
+ * Log duplicate callback
+ * @param {object} data - Duplicate callback data
+ */
+function logDuplicateCallback(data) {
+  logSecurityEvent(
+    LOG_LEVELS.INFO,
+    EVENT_TYPES.DUPLICATE_CALLBACK,
+    'Duplicate webhook callback detected - idempotency check prevented reprocessing',
+    {
+      txRef: data.txRef,
+      paymentId: data.paymentId,
+      currentStatus: data.currentStatus,
+      ip: data.ip,
+      timestamp: data.timestamp
+    }
+  );
+}
+
 module.exports = {
   LOG_LEVELS,
   EVENT_TYPES,
@@ -418,5 +438,6 @@ module.exports = {
   logPaymentFailure,
   logOrderConfirmation,
   logDuplicatePaymentAttempt,
+  logDuplicateCallback,
   sanitizeData
 };

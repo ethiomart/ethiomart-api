@@ -112,6 +112,36 @@ router.post(
   paymentController.handleWebhook
 );
 
+// POST /api/payments/callback - Handle Chapa callback with async verification (Task 7)
+// Task 7.1-7.10: Professional callback handler with immediate response and async verification
+// Note: This is the new implementation that responds immediately and verifies asynchronously
+router.post(
+  '/callback',
+  webhookLimiter, // Apply webhook-specific rate limiting
+  paymentController.handleCallback
+);
+
+// GET /api/payments/return - Handle Chapa return URL (Task 9)
+// Task 9.1-9.6: Return URL handler that signals Flutter WebView to close
+// This endpoint returns an HTML page that the Flutter WebView displays after payment
+// The HTML includes JavaScript that signals the WebView to close and return to the app
+// Note: This is a public endpoint (no authentication) as it's accessed by Chapa redirect
+router.get(
+  '/return',
+  paymentController.handleReturn
+);
+
+// GET /api/payments/status/:tx_ref - Get payment status for polling (Task 11.5)
+// Task 11.1-11.6: Payment status polling endpoint for Flutter app
+// This endpoint allows the Flutter app to poll for payment status after WebView closes
+// Returns payment status, amount, and order details
+// Note: This is a public endpoint (no authentication) as it's accessed after return URL redirect
+router.get(
+  '/status/:tx_ref',
+  verifyLimiter, // Apply moderate rate limiting to prevent abuse
+  paymentController.getPaymentStatus
+);
+
 // GET /api/payments/history - Get payment history with filtering (admin only)
 router.get('/history', verifyToken, requireRole(['admin']), paymentController.getPaymentHistory);
 

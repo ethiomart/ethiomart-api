@@ -20,7 +20,9 @@ router.use(requireRole(['admin']));
 // --- MOUNT MODULAR ROUTES ---
 router.use('/dashboard', require('./admin/dashboard.routes'));
 router.use('/users', require('./admin/users.routes'));
+router.use('/sellers', require('./admin/sellers.routes'));
 router.use('/products', require('./admin/products.routes'));
+router.use('/attributes', require('./admin/attributes.routes'));
 router.use('/categories', require('./admin/categories.routes'));
 router.use('/brands', require('./admin/brands.routes'));
 router.use('/orders', require('./admin/orders.routes'));

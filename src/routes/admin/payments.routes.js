@@ -8,5 +8,6 @@ router.get('/logs', paymentsController.getPaymentLogs);
 router.put('/chapa/config', settingsController.updateChapaSettings);
 router.get('/transactions/:id', paymentsController.getTransactionById);
 router.post('/transactions/:id/retry', paymentsController.retryPayment);
+router.post('/verify', paymentsController.manualVerifyPayment);
 
 module.exports = router;

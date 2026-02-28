@@ -146,6 +146,88 @@ async function retryWithBackoff(fn, maxRetries = 3) {
  */
 async function initializePayment(orderId, amount, email, firstName, lastName, phoneNumber = null, paymentMethod = null) {
   try {
+    // Read and validate callback_url from environment
+    const callbackUrl = process.env.CHAPA_CALLBACK_URL;
+    if (!callbackUrl) {
+      const errorMsg = 'CHAPA_CALLBACK_URL is not configured in environment variables. Please set CHAPA_CALLBACK_URL in your .env file (e.g., https://yourdomain.com/api/payments/callback)';
+      console.error('Payment initialization failed:', {
+        error: 'Missing callback URL configuration',
+        orderId,
+        timestamp: new Date().toISOString()
+      });
+      throw new Error(errorMsg);
+    }
+    
+    // Validate callback URL is absolute and properly formatted
+    try {
+      const callbackUrlObj = new URL(callbackUrl);
+      if (!callbackUrlObj.protocol || !callbackUrlObj.hostname) {
+        throw new Error('CHAPA_CALLBACK_URL must be a valid absolute URL with protocol and hostname');
+      }
+      // Ensure HTTPS in production
+      if (process.env.NODE_ENV === 'production' && callbackUrlObj.protocol !== 'https:') {
+        const errorMsg = 'CHAPA_CALLBACK_URL must use HTTPS in production environment for security. Current URL uses: ' + callbackUrlObj.protocol;
+        console.error('Payment initialization failed:', {
+          error: 'Insecure callback URL in production',
+          protocol: callbackUrlObj.protocol,
+          orderId,
+          timestamp: new Date().toISOString()
+        });
+        throw new Error(errorMsg);
+      }
+    } catch (urlError) {
+      const errorMsg = `Invalid CHAPA_CALLBACK_URL format: ${urlError.message}. Expected format: https://yourdomain.com/api/payments/callback`;
+      console.error('Payment initialization failed:', {
+        error: 'Invalid callback URL format',
+        callbackUrl,
+        urlError: urlError.message,
+        orderId,
+        timestamp: new Date().toISOString()
+      });
+      throw new Error(errorMsg);
+    }
+
+    // Read and validate return_url from environment
+    const returnUrl = process.env.CHAPA_RETURN_URL;
+    if (!returnUrl) {
+      const errorMsg = 'CHAPA_RETURN_URL is not configured in environment variables. Please set CHAPA_RETURN_URL in your .env file (e.g., https://yourdomain.com/api/payments/return)';
+      console.error('Payment initialization failed:', {
+        error: 'Missing return URL configuration',
+        orderId,
+        timestamp: new Date().toISOString()
+      });
+      throw new Error(errorMsg);
+    }
+    
+    // Validate return URL is absolute and properly formatted
+    try {
+      const returnUrlObj = new URL(returnUrl);
+      if (!returnUrlObj.protocol || !returnUrlObj.hostname) {
+        throw new Error('CHAPA_RETURN_URL must be a valid absolute URL with protocol and hostname');
+      }
+      // Ensure HTTPS in production
+      if (process.env.NODE_ENV === 'production' && returnUrlObj.protocol !== 'https:') {
+        const errorMsg = 'CHAPA_RETURN_URL must use HTTPS in production environment for security. Current URL uses: ' + returnUrlObj.protocol;
+        console.error('Payment initialization failed:', {
+          error: 'Insecure return URL in production',
+          protocol: returnUrlObj.protocol,
+          orderId,
+          timestamp: new Date().toISOString()
+        });
+        throw new Error(errorMsg);
+      }
+    } catch (urlError) {
+      const errorMsg = `Invalid CHAPA_RETURN_URL format: ${urlError.message}. Expected format: https://yourdomain.com/api/payments/return`;
+      console.error('Payment initialization failed:', {
+        error: 'Invalid return URL format',
+        returnUrl,
+        urlError: urlError.message,
+        orderId,
+        timestamp: new Date().toISOString()
+      });
+      throw new Error(errorMsg);
+    }
+
     // Generate a unique transaction reference
     const txRef = `order-${orderId}-${Date.now()}`;
 
@@ -157,8 +239,8 @@ async function initializePayment(orderId, amount, email, firstName, lastName, ph
       first_name: firstName,
       last_name: lastName,
       tx_ref: txRef,
-      callback_url: chapaConfig.callbackUrl,
-      return_url: chapaConfig.returnUrl,
+      callback_url: callbackUrl,
+      return_url: returnUrl,
       customization: {
         title: 'Multi-Vendor E-Commerce',
         description: `Payment for order #${orderId}`,
@@ -181,6 +263,53 @@ async function initializePayment(orderId, amount, email, firstName, lastName, ph
       payload.payment_method = paymentMethod;
     }
 
+    // ============================================
+    // REQUEST PAYLOAD LOGGING (Task 16.4)
+    // ============================================
+    // Log payment initialization request (excluding sensitive data)
+    // Note: Customer email, phone, and full names are excluded for privacy
+    // Amount is only logged in non-production environments
+    const logData = {
+      orderId,
+      currency: payload.currency,
+      tx_ref: txRef,
+      callback_url: callbackUrl,
+      return_url: returnUrl,
+      payment_method: paymentMethod || 'default',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      // Request metadata
+      request_url: `${chapaConfig.apiUrl}/transaction/initialize`,
+      request_method: 'POST',
+      has_phone_number: !!phoneNumber,
+      has_payment_method: !!paymentMethod
+    };
+
+    // Only log amount and customer initials in non-production environments for security
+    if (process.env.NODE_ENV !== 'production') {
+      logData.amount = payload.amount;
+      logData.customer_initials = `${firstName.charAt(0)}.${lastName.charAt(0)}.`;
+      // Log sanitized request payload structure (non-production only)
+      logData.request_payload_structure = {
+        amount: 'string',
+        currency: payload.currency,
+        email: 'REDACTED',
+        first_name: 'REDACTED',
+        last_name: 'REDACTED',
+        tx_ref: txRef,
+        callback_url: 'configured',
+        return_url: 'configured',
+        phone_number: phoneNumber ? 'provided' : 'not_provided',
+        payment_method: paymentMethod || 'not_specified',
+        customization: 'configured',
+        meta: 'configured'
+      };
+    }
+
+    console.log('=== PAYMENT INITIALIZATION REQUEST ===');
+    console.log('Request Details:', JSON.stringify(logData, null, 2));
+    console.log('======================================');
+
     // Make POST request to Chapa API with retry and circuit breaker
     const response = await chapaCircuitBreaker.execute(async () => {
       return await retryWithBackoff(async () => {
@@ -197,6 +326,43 @@ async function initializePayment(orderId, amount, email, firstName, lastName, ph
         );
       }, 3); // 3 retries with exponential backoff (1s, 2s, 4s)
     });
+
+    // ============================================
+    // RESPONSE STATUS AND BODY LOGGING (Task 16.5)
+    // ============================================
+    // Log payment initialization response (excluding sensitive data)
+    const responseLogData = {
+      orderId,
+      tx_ref: txRef,
+      response_status: response.status,
+      response_status_text: response.statusText,
+      response_data_status: response.data?.status,
+      response_message: response.data?.message,
+      has_checkout_url: !!response.data?.data?.checkout_url,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      // Response metadata
+      response_headers: {
+        'content-type': response.headers['content-type'],
+        'x-request-id': response.headers['x-request-id']
+      }
+    };
+
+    // Only log full response body structure in non-production environments
+    if (process.env.NODE_ENV !== 'production') {
+      responseLogData.response_body_structure = {
+        status: response.data?.status,
+        message: response.data?.message,
+        data: response.data?.data ? {
+          checkout_url: 'present',
+          tx_ref: response.data.data.tx_ref || 'not_present'
+        } : 'not_present'
+      };
+    }
+
+    console.log('=== PAYMENT INITIALIZATION RESPONSE ===');
+    console.log('Response Details:', JSON.stringify(responseLogData, null, 2));
+    console.log('=======================================');
 
     // Extract payment URL and reference from response
     if (response.data && response.data.status === 'success') {
@@ -229,7 +395,68 @@ async function initializePayment(orderId, amount, email, firstName, lastName, ph
       throw new Error('Failed to initialize payment with Chapa');
     }
   } catch (error) {
-    console.error('Chapa payment initialization error:', error.response?.data || error.message);
+    // Log detailed error information (excluding sensitive data)
+    // Note: Customer email, phone, and full names are excluded for privacy
+    // Amount is only logged in non-production environments
+    const errorLogData = {
+      orderId,
+      currency: chapaConfig.currency,
+      errorMessage: error.message,
+      errorType: error.name || 'Unknown',
+      errorCode: error.code,
+      errorStatus: error.response?.status,
+      errorStatusText: error.response?.statusText,
+      errorData: error.response?.data,
+      errorHeaders: error.response?.headers ? {
+        'content-type': error.response.headers['content-type'],
+        'x-request-id': error.response.headers['x-request-id']
+      } : undefined,
+      requestUrl: error.config?.url,
+      requestMethod: error.config?.method?.toUpperCase(),
+      requestTimeout: error.config?.timeout,
+      isRetryableError: isRetryableError(error),
+      circuitBreakerState: chapaCircuitBreaker.getState(),
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development'
+    };
+
+    // Only log amount and customer initials in non-production environments
+    if (process.env.NODE_ENV !== 'production') {
+      errorLogData.amount = amount;
+      errorLogData.customer_initials = `${firstName.charAt(0)}.${lastName.charAt(0)}.`;
+      errorLogData.requestPayload = {
+        currency: chapaConfig.currency,
+        tx_ref: `order-${orderId}-${Date.now()}`,
+        callback_url: process.env.CHAPA_CALLBACK_URL,
+        return_url: process.env.CHAPA_RETURN_URL
+      };
+    }
+
+    // Log comprehensive error details
+    console.error('=== CHAPA API ERROR - Payment Initialization ===');
+    console.error('Error Details:', JSON.stringify(errorLogData, null, 2));
+    
+    // Log specific error categories for easier debugging
+    if (error.code === 'ECONNREFUSED') {
+      console.error('Connection Error: Unable to reach Chapa API server. Check network connectivity and API URL.');
+    } else if (error.code === 'ETIMEDOUT') {
+      console.error('Timeout Error: Chapa API request timed out. The server may be slow or unresponsive.');
+    } else if (error.response?.status === 401) {
+      console.error('Authentication Error: Invalid or missing Chapa API secret key. Verify CHAPA_SECRET_KEY in environment.');
+    } else if (error.response?.status === 400) {
+      console.error('Validation Error: Invalid request payload. Check required fields and data formats.');
+      if (error.response?.data?.errors) {
+        console.error('Field Errors:', JSON.stringify(error.response.data.errors, null, 2));
+      }
+    } else if (error.response?.status === 429) {
+      console.error('Rate Limit Error: Too many requests to Chapa API. Implement rate limiting or retry with backoff.');
+    } else if (error.response?.status >= 500) {
+      console.error('Server Error: Chapa API server error. This is typically temporary - retry may succeed.');
+    }
+    
+    console.error('=== END CHAPA API ERROR ===');
+
+    console.error('Chapa payment initialization error:', errorLogData);
     
     // Send error notification to finance email
     try {
@@ -260,6 +487,22 @@ async function initializePayment(orderId, amount, email, firstName, lastName, ph
  */
 async function verifyPayment(reference) {
   try {
+    // ============================================
+    // REQUEST PAYLOAD LOGGING (Task 16.4)
+    // ============================================
+    // Log payment verification request (excluding sensitive data)
+    const logData = {
+      reference,
+      request_url: `${chapaConfig.apiUrl}/transaction/verify/${reference}`,
+      request_method: 'GET',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development'
+    };
+
+    console.log('=== PAYMENT VERIFICATION REQUEST ===');
+    console.log('Request Details:', JSON.stringify(logData, null, 2));
+    console.log('====================================');
+
     // Make GET request to Chapa API to verify payment with retry and circuit breaker
     const response = await chapaCircuitBreaker.execute(async () => {
       return await retryWithBackoff(async () => {
@@ -274,6 +517,51 @@ async function verifyPayment(reference) {
         );
       }, 3); // 3 retries with exponential backoff (1s, 2s, 4s)
     });
+
+    // ============================================
+    // RESPONSE STATUS AND BODY LOGGING (Task 16.5)
+    // ============================================
+    // Log payment verification response (excluding sensitive data)
+    const responseLogData = {
+      reference,
+      response_status: response.status,
+      response_status_text: response.statusText,
+      response_data_status: response.data?.status,
+      response_message: response.data?.message,
+      payment_status: response.data?.data?.status,
+      payment_method: response.data?.data?.payment_method,
+      has_customer_data: !!response.data?.data?.customer,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      // Response metadata
+      response_headers: {
+        'content-type': response.headers['content-type'],
+        'x-request-id': response.headers['x-request-id']
+      }
+    };
+
+    // Only log amount and full response structure in non-production environments
+    if (process.env.NODE_ENV !== 'production') {
+      responseLogData.amount = response.data?.data?.amount;
+      responseLogData.currency = response.data?.data?.currency;
+      responseLogData.response_body_structure = {
+        status: response.data?.status,
+        message: response.data?.message,
+        data: response.data?.data ? {
+          status: response.data.data.status,
+          amount: 'present',
+          currency: response.data.data.currency,
+          tx_ref: response.data.data.tx_ref || 'not_present',
+          payment_method: response.data.data.payment_method || 'not_present',
+          customer: response.data.data.customer ? 'present' : 'not_present',
+          id: response.data.data.id || 'not_present'
+        } : 'not_present'
+      };
+    }
+
+    console.log('=== PAYMENT VERIFICATION RESPONSE ===');
+    console.log('Response Details:', JSON.stringify(responseLogData, null, 2));
+    console.log('=====================================');
 
     // Extract payment details from response
     if (response.data && response.data.status === 'success') {
@@ -336,6 +624,49 @@ async function verifyPayment(reference) {
       throw new Error('Failed to verify payment with Chapa');
     }
   } catch (error) {
+    // Log detailed error information for payment verification
+    const errorLogData = {
+      reference,
+      errorMessage: error.message,
+      errorType: error.name || 'Unknown',
+      errorCode: error.code,
+      errorStatus: error.response?.status,
+      errorStatusText: error.response?.statusText,
+      errorData: error.response?.data,
+      errorHeaders: error.response?.headers ? {
+        'content-type': error.response.headers['content-type'],
+        'x-request-id': error.response.headers['x-request-id']
+      } : undefined,
+      requestUrl: error.config?.url,
+      requestMethod: error.config?.method?.toUpperCase(),
+      requestTimeout: error.config?.timeout,
+      isRetryableError: isRetryableError(error),
+      circuitBreakerState: chapaCircuitBreaker.getState(),
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development'
+    };
+
+    // Log comprehensive error details
+    console.error('=== CHAPA API ERROR - Payment Verification ===');
+    console.error('Error Details:', JSON.stringify(errorLogData, null, 2));
+    
+    // Log specific error categories for easier debugging
+    if (error.code === 'ECONNREFUSED') {
+      console.error('Connection Error: Unable to reach Chapa API server. Check network connectivity and API URL.');
+    } else if (error.code === 'ETIMEDOUT') {
+      console.error('Timeout Error: Chapa API request timed out. The server may be slow or unresponsive.');
+    } else if (error.response?.status === 401) {
+      console.error('Authentication Error: Invalid or missing Chapa API secret key. Verify CHAPA_SECRET_KEY in environment.');
+    } else if (error.response?.status === 404) {
+      console.error('Not Found Error: Transaction reference not found in Chapa system. Verify the reference is correct.');
+    } else if (error.response?.status === 429) {
+      console.error('Rate Limit Error: Too many requests to Chapa API. Implement rate limiting or retry with backoff.');
+    } else if (error.response?.status >= 500) {
+      console.error('Server Error: Chapa API server error. This is typically temporary - retry may succeed.');
+    }
+    
+    console.error('=== END CHAPA API ERROR ===');
+
     console.error('Chapa payment verification error:', error.response?.data || error.message);
     throw new Error(`Payment verification failed: ${error.response?.data?.message || error.message}`);
   }

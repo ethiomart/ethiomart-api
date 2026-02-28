@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const { transformImageUrls } = require('../utils/imageUtils');
 
 /**
  * Upload profile picture
@@ -35,7 +36,7 @@ const uploadProfilePicture = async (req, res, next) => {
       success: true,
       message: 'Profile picture uploaded successfully',
       data: {
-        profilePictureUrl: profilePictureUrl // Keep camelCase for response if frontend expects it
+        profilePictureUrl: transformImageUrls(req, profilePictureUrl) // Return absolute URL
       }
     });
   } catch (error) {

@@ -68,10 +68,10 @@ const getWishlist = async (req, res, next) => {
       message: 'Wishlist retrieved successfully',
       data: {
         id: wishlist.id,
-        userId: wishlist.userId,
+        user_id: wishlist.user_id,
         products: products,
-        createdAt: wishlist.createdAt,
-        updatedAt: wishlist.updatedAt
+        created_at: wishlist.created_at,
+        updated_at: wishlist.updated_at
       }
     });
   } catch (error) {
@@ -235,10 +235,10 @@ const addToWishlist = async (req, res, next) => {
         message: 'Product already in wishlist',
         data: {
           id: updatedWishlist.id,
-          userId: updatedWishlist.userId,
+          user_id: updatedWishlist.user_id || userId,
           products: products,
-          createdAt: updatedWishlist.createdAt,
-          updatedAt: updatedWishlist.updatedAt
+          created_at: updatedWishlist.created_at || new Date(),
+          updated_at: updatedWishlist.updated_at || new Date()
         }
       });
     }
@@ -286,10 +286,10 @@ const addToWishlist = async (req, res, next) => {
       message: 'Product added to wishlist',
       data: {
         id: updatedWishlist.id,
-        userId: updatedWishlist.userId,
+        user_id: updatedWishlist.user_id || userId,
         products: products,
-        createdAt: updatedWishlist.createdAt,
-        updatedAt: updatedWishlist.updatedAt
+        created_at: updatedWishlist.created_at || new Date(),
+        updated_at: updatedWishlist.updated_at || new Date()
       }
     });
   } catch (error) {
@@ -484,10 +484,10 @@ const removeFromWishlist = async (req, res, next) => {
       message: 'Product removed from wishlist',
       data: {
         id: updatedWishlist.id,
-        userId: updatedWishlist.userId,
+        user_id: updatedWishlist.user_id || userId,
         products: products,
-        createdAt: updatedWishlist.createdAt,
-        updatedAt: updatedWishlist.updatedAt
+        created_at: updatedWishlist.created_at || new Date(),
+        updated_at: updatedWishlist.updated_at || new Date()
       }
     });
   } catch (error) {

@@ -134,6 +134,35 @@ async function retryWithBackoff(fn, maxRetries = 3) {
 }
 
 /**
+ * Sanitize phone number for Chapa (Expected: 2519..., 09..., or 07...)
+ * @param {string} phone - Original phone number
+ * @returns {string|null} - Sanitized phone number or null
+ */
+function sanitizePhoneNumber(phone) {
+  if (!phone) return null;
+  
+  // Remove all non-numeric characters
+  let sanitized = phone.replace(/\D/g, '');
+  
+  // Handle 251 country code - Chapa often prefers local 09... format for mobile money
+  if (sanitized.length === 12 && sanitized.startsWith('251')) {
+    return '0' + sanitized.substring(3);
+  }
+  
+  // Handle local 09... or 07... (10 digits)
+  if (sanitized.length === 10 && (sanitized.startsWith('09') || sanitized.startsWith('07'))) {
+    return sanitized;
+  }
+
+  // If it's 9 digits starting with 9 or 7, prepend 0
+  if (sanitized.length === 9 && (sanitized.startsWith('9') || sanitized.startsWith('7'))) {
+    return '0' + sanitized;
+  }
+  
+  return sanitized;
+}
+
+/**
  * Initialize a payment with Chapa
  * @param {string} orderId - The order ID
  * @param {number} amount - The payment amount
@@ -205,6 +234,15 @@ async function initializePayment(orderId, amount, email, firstName, lastName, ph
       if (!returnUrlObj.protocol || !returnUrlObj.hostname) {
         throw new Error('CHAPA_RETURN_URL must be a valid absolute URL with protocol and hostname');
       }
+
+      // 🚨 DOMAIN WARNING (For developers) 🚨
+      const suspectedDomains = ['ethiomart.com', 'api.ethiomart.com'];
+      if (suspectedDomains.includes(returnUrlObj.hostname)) {
+        console.warn(`\n⚠️  [CHAPA WARNING] Your return_url uses '${returnUrlObj.hostname}'.`);
+        console.warn(`If you are testing locally AND seeing "Unauthorized domain detected",`);
+        console.warn(`ensure this domain is whitelisted in your Chapa Dashboard (https://dashboard.chapa.co/settings/api).\n`);
+      }
+
       // Ensure HTTPS in production
       if (process.env.NODE_ENV === 'production' && returnUrlObj.protocol !== 'https:') {
         const errorMsg = 'CHAPA_RETURN_URL must use HTTPS in production environment for security. Current URL uses: ' + returnUrlObj.protocol;
@@ -242,8 +280,8 @@ async function initializePayment(orderId, amount, email, firstName, lastName, ph
       callback_url: callbackUrl,
       return_url: returnUrl,
       customization: {
-        title: 'Multi-Vendor E-Commerce',
-        description: `Payment for order #${orderId}`,
+        title: 'EthioMart',
+        description: `Order ${orderId}`,
         logo: process.env.MERCHANT_LOGO_URL || ''
       },
       meta: {
@@ -255,7 +293,7 @@ async function initializePayment(orderId, amount, email, firstName, lastName, ph
 
     // Add phone number if provided (for mobile money)
     if (phoneNumber) {
-      payload.phone_number = phoneNumber;
+      payload.phone_number = sanitizePhoneNumber(phoneNumber);
     }
 
     // Add preferred payment method if specified
@@ -382,7 +420,8 @@ async function initializePayment(orderId, amount, email, firstName, lastName, ph
           `
         );
       } catch (emailError) {
-        console.error('Failed to send finance notification:', emailError.message);
+        // Silent failure for email - don't let email issues break the payment flow
+        console.warn('📧 [NON-BLOCKING] Failed to send finance notification:', emailError.message);
       }
 
       return {
@@ -476,7 +515,39 @@ async function initializePayment(orderId, amount, email, firstName, lastName, ph
       console.error('Failed to send error notification:', emailError.message);
     }
     
-    throw new Error(`Payment initialization failed: ${error.response?.data?.message || error.message}`);
+    // Ultra-robust error formatting
+    let errorMessage = error.message;
+    
+    if (error.response?.data) {
+      try {
+        errorMessage = typeof error.response.data === 'string' 
+          ? error.response.data 
+          : JSON.stringify(error.response.data);
+      } catch (e) {
+        errorMessage = 'Could not stringify error data: ' + error.message;
+      }
+    } else if (error.message) {
+      errorMessage = error.message;
+    }
+    
+    // Log to a local file for emergency debugging on user's system
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const logFile = path.join(process.cwd(), 'chapa_debug.log');
+      const logEntry = `\n--- ${new Date().toISOString()} ---\n` +
+                       `Order ID: ${orderId}\n` +
+                       `Error: ${error.message}\n` +
+                       `Response Data: ${JSON.stringify(error.response?.data, null, 2)}\n` +
+                       `---------------------------\n`;
+      fs.appendFileSync(logFile, logEntry);
+      console.log(`Chapa debug info written to ${logFile}`);
+    } catch (logErr) {
+      console.error('Failed to write to debug log:', logErr.message);
+    }
+    
+    console.error('!!!ANTIGRAVITY_CHAPA_ERROR_FINAL!!!', errorMessage);
+    throw new Error(`Payment initialization failed: ${errorMessage}`);
   }
 }
 
@@ -667,8 +738,18 @@ async function verifyPayment(reference) {
     
     console.error('=== END CHAPA API ERROR ===');
 
+    // Helper to format Chapa error message
+    let errorMessage = error.message;
+    if (error.response?.data?.message) {
+      if (typeof error.response.data.message === 'object') {
+        errorMessage = JSON.stringify(error.response.data.message);
+      } else {
+        errorMessage = error.response.data.message;
+      }
+    }
+
     console.error('Chapa payment verification error:', error.response?.data || error.message);
-    throw new Error(`Payment verification failed: ${error.response?.data?.message || error.message}`);
+    throw new Error(`Payment verification failed: ${errorMessage}`);
   }
 }
 

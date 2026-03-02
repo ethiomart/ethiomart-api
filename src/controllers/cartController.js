@@ -1,155 +1,150 @@
-const Cart = require('../models/Cart');
-const CartItem = require('../models/CartItem');
-const Product = require('../models/Product');
-const Seller = require('../models/Seller');
-const VariantCombination = require('../models/VariantCombination');
-const VariantValue = require('../models/VariantValue');
-const VariantOption = require('../models/VariantOption');
+const { 
+  Cart, 
+  CartItem, 
+  Product, 
+  Seller, 
+  VariantCombination, 
+  VariantValue, 
+  VariantOption,
+  sequelize
+} = require('../models');
 const variantService = require('../services/variantService');
-const sequelize = require('../config/database');
 
 /**
- * Get user's cart with items and total
- * @route GET /api/cart
- * @access Private
+ * Helper to get and format cart
  */
+const getFormattedCart = async (userId) => {
+  const cart = await Cart.findOne({
+    where: { user_id: userId },
+    include: [
+      {
+        model: CartItem,
+        as: 'items',
+        include: [
+          {
+            model: Product,
+            as: 'product',
+            attributes: ['id', 'name', 'description', 'price', 'quantity', 'images', 'is_published'],
+            include: [
+              {
+                model: Seller,
+                as: 'seller',
+                attributes: ['id', 'store_name']
+              }
+            ]
+          },
+          {
+            model: VariantCombination,
+            as: 'variantCombination',
+            attributes: ['id', 'sku', 'price', 'stock_quantity', 'image_url', 'is_active'],
+            include: [
+              {
+                model: VariantValue,
+                as: 'variantValues',
+                attributes: ['id', 'value_name'],
+                through: { attributes: [] },
+                include: [
+                  {
+                    model: VariantOption,
+                    as: 'option',
+                    attributes: ['option_name']
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+
+  if (!cart) return null;
+
+  let total = 0;
+  const items = cart.items || [];
+  
+  const validItems = items.filter(item => {
+    if (!item.product) return false;
+    if (!item.product.is_published) return false;
+    if (item.variant_combination_id && item.variantCombination) {
+      if (!item.variantCombination.is_active || item.variantCombination.stock_quantity === 0) return false;
+    }
+    return true;
+  });
+  
+  validItems.forEach(item => {
+    const price = item.variantCombination 
+      ? parseFloat(item.variantCombination.price) 
+      : parseFloat(item.product.price);
+    total += item.quantity * price;
+  });
+
+  const formattedItems = validItems.map(item => {
+    const baseItem = {
+      id: item.id,
+      cart_id: item.cart_id,
+      product_id: item.product_id,
+      quantity: item.quantity,
+      product: item.product,
+      variant_combination_id: item.variant_combination_id,
+      created_at: item.created_at,
+      updated_at: item.updated_at
+    };
+
+    if (item.variant_combination_id && item.variantCombination) {
+      baseItem.variant = {
+        id: item.variantCombination.id,
+        sku: item.variantCombination.sku,
+        price: parseFloat(item.variantCombination.price),
+        stock_quantity: item.variantCombination.stock_quantity,
+        image_url: item.variantCombination.image_url,
+        is_active: item.variantCombination.is_active,
+        description: item.variantCombination.variantValues
+          .map(v => v.value_name)
+          .join(' / '),
+        variant_values: item.variantCombination.variantValues.map(v => ({
+          option_name: v.option.option_name,
+          value_name: v.value_name
+        }))
+      };
+    }
+
+    return baseItem;
+  });
+
+  return {
+    id: cart.id,
+    user_id: cart.user_id || cart.userId,
+    items: formattedItems,
+    total: parseFloat(total.toFixed(2)),
+    item_count: validItems.length,
+    created_at: cart.created_at || cart.createdAt,
+    updated_at: cart.updated_at || cart.updatedAt
+  };
+};
+
 const getCart = async (req, res, next) => {
   try {
     const userId = req.user.id;
+    let cartData = await getFormattedCart(userId);
 
-    // Find or create cart for user
-    let cart = await Cart.findOne({
-      where: { user_id: userId },
-      include: [
-        {
-          model: CartItem,
-          as: 'items',
-          include: [
-            {
-              model: Product,
-              as: 'product',
-              attributes: ['id', 'name', 'description', 'price', 'quantity', 'images', 'is_published'],
-              include: [
-                {
-                  model: Seller,
-                  as: 'seller',
-                  attributes: ['id', 'store_name']
-                }
-              ]
-            },
-            {
-              model: VariantCombination,
-              as: 'variantCombination',
-              attributes: ['id', 'sku', 'price', 'stock_quantity', 'image_url', 'is_active'],
-              include: [
-                {
-                  model: VariantValue,
-                  as: 'variantValues',
-                  attributes: ['id', 'value_name'],
-                  through: { attributes: [] },
-                  include: [
-                    {
-                      model: VariantOption,
-                      as: 'option',
-                      attributes: ['option_name']
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    });
-
-    // If no cart exists, create one
-    if (!cart) {
-      cart = await Cart.create({ user_id: userId });
-      cart.items = [];
-    }
-
-    // Calculate total
-    let total = 0;
-    const items = cart.items || [];
-    
-    // Filter out items with null or unpublished products
-    const validItems = items.filter(item => {
-      if (!item.product) {
-        console.warn(`⚠️ Cart item ${item.id} has null product (product_id: ${item.product_id})`);
-        return false;
-      }
-      if (!item.product.is_published) {
-        console.warn(`⚠️ Cart item ${item.id} has unpublished product (product_id: ${item.product_id})`);
-        return false;
-      }
-      // Check variant availability if variant is specified
-      if (item.variant_combination_id && item.variantCombination) {
-        if (!item.variantCombination.is_active || item.variantCombination.stock_quantity === 0) {
-          console.warn(`⚠️ Cart item ${item.id} has unavailable variant (variant_id: ${item.variant_combination_id})`);
-          return false;
-        }
-      }
-      return true;
-    });
-    
-    // Calculate total only for valid items
-    validItems.forEach(item => {
-      // Use variant price if available, otherwise use product price
-      const price = item.variantCombination 
-        ? parseFloat(item.variantCombination.price) 
-        : parseFloat(item.product.price);
-      total += item.quantity * price;
-    });
-
-    // Format items with variant details
-    const formattedItems = validItems.map(item => {
-      const baseItem = {
-        id: item.id,
-        cart_id: item.cart_id,
-        product_id: item.product_id,
-        quantity: item.quantity,
-        product: item.product,
-        created_at: item.created_at,
-        updated_at: item.updated_at
+    if (!cartData) {
+      const cart = await Cart.create({ user_id: userId });
+      cartData = {
+        id: cart.id,
+        user_id: userId,
+        items: [],
+        total: 0,
+        item_count: 0,
+        created_at: cart.created_at,
+        updated_at: cart.updated_at
       };
-
-      // Add variant details if present
-      if (item.variant_combination_id && item.variantCombination) {
-        baseItem.variant_combination_id = item.variant_combination_id;
-        baseItem.variant = {
-          id: item.variantCombination.id,
-          sku: item.variantCombination.sku,
-          price: parseFloat(item.variantCombination.price),
-          stock_quantity: item.variantCombination.stock_quantity,
-          image_url: item.variantCombination.image_url,
-          is_active: item.variantCombination.is_active,
-          description: item.variantCombination.variantValues
-            .map(v => v.value_name)
-            .join(' / '),
-          variant_values: item.variantCombination.variantValues.map(v => ({
-            option_name: v.option.option_name,
-            value_name: v.value_name
-          }))
-        };
-      }
-
-      return baseItem;
-    });
+    }
 
     res.status(200).json({
       success: true,
       message: 'Cart retrieved successfully',
-      data: {
-        cart: {
-          id: cart.id,
-          user_id: cart.user_id || cart.userId,
-          items: formattedItems,
-          total: parseFloat(total.toFixed(2)),
-          item_count: validItems.length,
-          created_at: cart.created_at || cart.createdAt,
-          updated_at: cart.updated_at || cart.updatedAt
-        }
-      }
+      data: { cart: cartData }
     });
   } catch (error) {
     next(error);
@@ -427,18 +422,13 @@ const addToCart = async (req, res, next) => {
     // Determine success message based on whether item was added or updated
     const message = cartItem.quantity === quantity ? 'Item added to cart' : 'Cart item updated';
 
+    // Fetch refreshed complete cart
+    const cartData = await getFormattedCart(userId);
+
     res.status(200).json({
       success: true,
       message: message,
-      data: {
-        id: updatedCart.id,
-        user_id: updatedCart.user_id || updatedCart.userId,
-        items: formattedItems,
-        total: parseFloat(total.toFixed(2)),
-        item_count: validItems.length,
-        created_at: updatedCart.created_at || updatedCart.createdAt,
-        updated_at: updatedCart.updated_at || updatedCart.updatedAt
-      }
+      data: { cart: cartData }
     });
   } catch (error) {
     next(error);
@@ -465,13 +455,15 @@ const updateCartItem = async (req, res, next) => {
     }
 
     // Find cart item
+    console.log(`🛒 [DEBUG] updateCartItem: userId=${userId}, cartItemId=${id}, quantity=${quantity}`);
+
     const cartItem = await CartItem.findByPk(id, {
       include: [
         {
           model: Cart,
           as: 'cart',
           where: { user_id: userId },
-          attributes: ['id', 'userId']
+          attributes: ['id', 'user_id']
         },
         {
           model: Product,
@@ -487,6 +479,21 @@ const updateCartItem = async (req, res, next) => {
     });
 
     if (!cartItem) {
+      console.error(`🛒 [ERROR] Cart item ${id} not found for user ${userId}. This could be an ID mismatch or an association issue.`);
+      // Debug: Check if the cart item exists at all without the user filter
+      const exists = await CartItem.findByPk(id);
+      if (exists) {
+        console.error(`🛒 [DEBUG] Cart item ${id} exists but belongs to cart_id ${exists.cart_id}. Checking ownership...`);
+        const cart = await Cart.findByPk(exists.cart_id);
+        if (cart) {
+          console.error(`🛒 [DEBUG] Cart ${exists.cart_id} belongs to user_id ${cart.user_id}. Current user: ${userId}`);
+        } else {
+          console.error(`🛒 [DEBUG] Cart ${exists.cart_id} not found!`);
+        }
+      } else {
+        console.error(`🛒 [DEBUG] Cart item ${id} does not exist in database.`);
+      }
+
       return res.status(404).json({
         success: false,
         message: 'Cart item not found'
@@ -616,12 +623,13 @@ const updateCartItem = async (req, res, next) => {
       };
     }
 
+    // Fetch refreshed complete cart
+    const cartData = await getFormattedCart(userId);
+
     res.status(200).json({
       success: true,
       message: 'Cart item updated successfully',
-      data: {
-        cartItem: responseItem
-      }
+      data: { cart: cartData }
     });
   } catch (error) {
     next(error);
@@ -645,7 +653,7 @@ const removeFromCart = async (req, res, next) => {
           model: Cart,
           as: 'cart',
           where: { user_id: userId },
-          attributes: ['id', 'userId']
+          attributes: ['id', 'user_id']
         }
       ]
     });
@@ -670,9 +678,13 @@ const removeFromCart = async (req, res, next) => {
     // Delete cart item
     await cartItem.destroy();
 
+    // Fetch refreshed complete cart
+    const cartData = await getFormattedCart(userId);
+
     res.status(200).json({
       success: true,
-      message: 'Item removed from cart successfully'
+      message: 'Item removed from cart successfully',
+      data: { cart: cartData }
     });
   } catch (error) {
     next(error);
@@ -703,9 +715,13 @@ const clearCart = async (req, res, next) => {
       where: { cart_id: cart.id }
     });
 
+    // Fetch refreshed empty cart
+    const cartData = await getFormattedCart(userId);
+
     res.status(200).json({
       success: true,
-      message: 'Cart cleared successfully'
+      message: 'Cart cleared successfully',
+      data: { cart: cartData }
     });
   } catch (error) {
     next(error);

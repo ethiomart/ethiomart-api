@@ -4,6 +4,7 @@ const sellerController = require('../controllers/sellerController');
 const variantController = require('../controllers/variantController');
 const { verifyToken, requireRole } = require('../middleware/auth');
 const { uploadSingle } = require('../middleware/upload');
+const { cloudinaryUpload } = require('../middleware/cloudinaryUpload');
 
 // POST /api/sellers/profile - Create seller profile
 router.post('/profile', verifyToken, requireRole(['seller']), sellerController.createSellerProfile);
@@ -15,7 +16,7 @@ router.get('/profile', verifyToken, requireRole(['seller']), sellerController.ge
 router.put('/profile', verifyToken, requireRole(['seller']), sellerController.updateSellerProfile);
 
 // POST /api/sellers/logo - Upload seller logo
-router.post('/logo', verifyToken, requireRole(['seller']), uploadSingle('logo'), sellerController.uploadLogo);
+router.post('/logo', verifyToken, requireRole(['seller']), uploadSingle('logo'), cloudinaryUpload('sellers/logos'), sellerController.uploadLogo);
 
 // GET /api/sellers/dashboard - Get seller dashboard
 router.get('/dashboard', verifyToken, requireRole(['seller']), sellerController.getSellerDashboard);

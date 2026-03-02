@@ -1,5 +1,6 @@
 const { Product, Seller, Category } = require('../../models');
 const { Op } = require('sequelize');
+const { deleteMultipleFromCloudinary } = require('../../utils/cloudinaryUtils');
 
 /**
  * Get all products (Admin view)
@@ -138,6 +139,11 @@ exports.deleteProduct = async (req, res, next) => {
     const product = await Product.findByPk(req.params.id);
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found' });
+    }
+
+    // Delete images from Cloudinary before destroying product
+    if (product.images && product.images.length > 0) {
+      await deleteMultipleFromCloudinary(product.images);
     }
 
     await product.destroy();

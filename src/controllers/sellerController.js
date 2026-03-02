@@ -8,6 +8,7 @@ const { Op } = require('sequelize');
 const sequelize = require('../config/database');
 const orderStatusService = require('../services/orderStatusService');
 const { transformImageUrls } = require('../utils/imageUtils');
+const { deleteFromCloudinary } = require('../utils/cloudinaryUtils');
 
 /**
  * Create seller profile for authenticated user
@@ -209,6 +210,12 @@ const uploadLogo = async (req, res, next) => {
 
     // Update seller with new logo URL
     const logoUrl = req.fileUrl; // Set by upload middleware
+    
+    // Delete old logo from Cloudinary if it exists
+    if (seller.store_logo) {
+      await deleteFromCloudinary(seller.store_logo);
+    }
+    
     await seller.update({ store_logo: logoUrl });
 
     // Reload to get updated data
@@ -657,7 +664,7 @@ const getEarnings = async (req, res, next) => {
         status: earningsConfirmed ? 'completed' : 'pending',
         earningsConfirmed: earningsConfirmed,
         createdAt: item.created_at,
-        description: `Sale of ${item.product.name}`,
+        description: `Sale of ${item.product ? item.product.name : 'Unknown Product'}`,
         orderId: item.order_id.toString(),
         orderNumber: item.order?.order_number || '',
         orderTotal: orderTotal,

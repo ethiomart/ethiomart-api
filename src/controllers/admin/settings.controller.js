@@ -1,4 +1,5 @@
 const { Setting, sequelize } = require('../../models');
+const { deleteFromCloudinary } = require('../../utils/cloudinaryUtils');
 
 /**
  * Get all settings
@@ -38,7 +39,12 @@ exports.updateSettings = async (req, res, next) => {
     // If it's FormData, it might be flat. If it's JSON, it might be nested or flat.
     // Handling logo upload first
     if (req.file) {
-      settingsData.logoUrl = req.file.path;
+      // Find old logo URL to delete from Cloudinary
+      const oldLogoSetting = await Setting.findOne({ where: { key: 'logoUrl', group: 'general' } });
+      if (oldLogoSetting && oldLogoSetting.value) {
+        await deleteFromCloudinary(oldLogoSetting.value);
+      }
+      settingsData.logoUrl = req.fileUrl || req.file.path;
     }
 
     // Mapping of keys to groups for flat structures (like GeneralSettings FormData)

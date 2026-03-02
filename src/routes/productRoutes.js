@@ -3,6 +3,7 @@ const router = express.Router();
 const productController = require('../controllers/productController');
 const { verifyToken, requireRole } = require('../middleware/auth');
 const { uploadMultiple } = require('../middleware/upload');
+const { cloudinaryUpload } = require('../middleware/cloudinaryUpload');
 const { validateProduct, handleValidationErrors } = require('../middleware/validation');
 
 // Import variant routes
@@ -14,6 +15,7 @@ router.post(
   verifyToken,
   requireRole(['seller']),
   uploadMultiple('images', 5),
+  cloudinaryUpload('products/images'),
   validateProduct,
   handleValidationErrors,
   productController.createProduct
@@ -34,6 +36,7 @@ router.put(
   verifyToken,
   requireRole(['seller', 'admin']),
   uploadMultiple('images', 5),
+  cloudinaryUpload('products/images'),
   productController.updateProduct
 );
 

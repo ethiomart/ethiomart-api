@@ -13,10 +13,10 @@ async function testCartController() {
     const testUser = await User.create({
       email: 'carttest@example.com',
       password: 'password123',
-      firstName: 'Cart',
-      lastName: 'Tester',
+      first_name: 'Cart',
+      last_name: 'Tester',
       role: 'customer',
-      isActive: true
+      is_active: true
     });
     console.log('✓ Test user created:', testUser.email);
 
@@ -24,18 +24,18 @@ async function testCartController() {
     const sellerUser = await User.create({
       email: 'cartseller@example.com',
       password: 'password123',
-      firstName: 'Seller',
-      lastName: 'Test',
+      first_name: 'Seller',
+      last_name: 'Test',
       role: 'seller',
-      isActive: true
+      is_active: true
     });
 
     const seller = await Seller.create({
-      userId: sellerUser.id,
-      businessName: 'Test Shop',
-      businessDescription: 'Test shop for cart testing',
-      businessAddress: '123 Test St',
-      phoneNumber: '1234567890'
+      user_id: sellerUser.id,
+      store_name: 'Test Shop',
+      store_description: 'Test shop for cart testing',
+      business_address: '123 Test St',
+      business_phone: '1234567890'
     });
     console.log('✓ Test seller created:', seller.businessName);
 
@@ -48,25 +48,25 @@ async function testCartController() {
 
     // Create test products
     const product1 = await Product.create({
-      sellerId: seller.id,
-      categoryId: category.id,
+      seller_id: seller.id,
+      category_id: category.id,
       name: 'Test Product 1',
       description: 'First test product',
       price: 29.99,
-      stock: 10,
+      quantity: 10,
       images: ['/uploads/test1.jpg'],
-      isActive: true
+      is_published: true
     });
 
     const product2 = await Product.create({
-      sellerId: seller.id,
-      categoryId: category.id,
+      seller_id: seller.id,
+      category_id: category.id,
       name: 'Test Product 2',
       description: 'Second test product',
       price: 49.99,
-      stock: 5,
+      quantity: 5,
       images: ['/uploads/test2.jpg'],
-      isActive: true
+      is_published: true
     });
     console.log('✓ Test products created\n');
 

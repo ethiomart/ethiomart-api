@@ -44,36 +44,36 @@ async function testReviewController() {
     const customer = await User.create({
       email: 'customer@test.com',
       password: 'password123',
-      firstName: 'John',
-      lastName: 'Doe',
+      first_name: 'John',
+      last_name: 'Doe',
       role: 'customer'
     });
 
     const sellerUser = await User.create({
       email: 'seller@test.com',
       password: 'password123',
-      firstName: 'Jane',
-      lastName: 'Smith',
+      first_name: 'Jane',
+      last_name: 'Smith',
       role: 'seller'
     });
 
     const seller = await Seller.create({
-      userId: sellerUser.id,
-      businessName: 'Test Store',
-      businessDescription: 'A test store',
-      businessAddress: '123 Test St',
-      phoneNumber: '1234567890'
+      user_id: sellerUser.id,
+      store_name: 'Test Store',
+      store_description: 'A test store',
+      business_address: '123 Test St',
+      business_phone: '1234567890'
     });
 
     console.log('✓ Test users created\n');
 
     // Create test product
     const product = await Product.create({
-      sellerId: seller.id,
+      seller_id: seller.id,
       name: 'Test Product',
       description: 'A test product',
       price: 99.99,
-      stock: 10,
+      quantity: 10,
       images: ['/uploads/test.jpg']
     });
 
@@ -81,10 +81,10 @@ async function testReviewController() {
 
     // Create test order (customer purchased the product)
     const order = await Order.create({
-      userId: customer.id,
-      totalAmount: 99.99,
-      status: 'paid',
-      shippingAddress: {
+      user_id: customer.id,
+      total_amount: 99.99,
+      order_status: 'paid',
+      shipping_address: {
         street: '123 Main St',
         city: 'Test City',
         state: 'TS',
@@ -93,12 +93,11 @@ async function testReviewController() {
     });
 
     await OrderItem.create({
-      orderId: order.id,
-      productId: product.id,
-      sellerId: seller.id,
+      order_id: order.id,
+      product_id: product.id,
+      seller_id: seller.id,
       quantity: 1,
-      priceAtPurchase: 99.99,
-      status: 'pending'
+      price_at_purchase: 99.99
     });
 
     console.log('✓ Test order created\n');

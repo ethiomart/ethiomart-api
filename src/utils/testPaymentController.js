@@ -30,8 +30,8 @@ async function testPaymentController() {
     const user = await User.create({
       email: `customer${timestamp}@test.com`,
       password: 'password123',
-      firstName: 'John',
-      lastName: 'Doe',
+      first_name: 'John',
+      last_name: 'Doe',
       role: 'customer'
     });
     console.log('✓ Test user created');
@@ -40,17 +40,17 @@ async function testPaymentController() {
     const sellerUser = await User.create({
       email: `seller${timestamp}@test.com`,
       password: 'password123',
-      firstName: 'Jane',
-      lastName: 'Smith',
+      first_name: 'Jane',
+      last_name: 'Smith',
       role: 'seller'
     });
 
     const seller = await Seller.create({
-      userId: sellerUser.id,
-      businessName: 'Test Store',
-      businessDescription: 'Test Description',
-      businessAddress: 'Test Address',
-      phoneNumber: '1234567890'
+      user_id: sellerUser.id,
+      store_name: 'Test Store',
+      store_description: 'Test Description',
+      business_address: 'Test Address',
+      business_phone: '1234567890'
     });
     console.log('✓ Test seller created');
 
@@ -62,22 +62,22 @@ async function testPaymentController() {
 
     // Create test product
     const product = await Product.create({
-      sellerId: seller.id,
-      categoryId: category.id,
+      seller_id: seller.id,
+      category_id: category.id,
       name: 'Test Product',
       description: 'Test Description',
       price: 100.00,
-      stock: 10,
+      quantity: 10,
       images: ['test.jpg']
     });
     console.log('✓ Test product created');
 
     // Create test order
     const order = await Order.create({
-      userId: user.id,
-      totalAmount: 100.00,
-      status: 'pending',
-      shippingAddress: {
+      user_id: user.id,
+      total_amount: 100.00,
+      order_status: 'pending',
+      shipping_address: {
         street: '123 Test St',
         city: 'Test City',
         country: 'Ethiopia'
@@ -160,7 +160,7 @@ async function testPaymentController() {
       const updatedPayment = await Payment.findByPk(existingPayment.id);
       const updatedOrder = await Order.findByPk(order.id);
       
-      if (updatedPayment.status === 'success' && updatedOrder.status === 'paid') {
+      if (updatedPayment.status === 'success' && updatedOrder.order_status === 'paid') {
         console.log('✓ Payment and order status updated correctly');
       } else {
         console.log('✗ Payment or order status not updated correctly');
@@ -177,10 +177,10 @@ async function testPaymentController() {
     
     // Create another order and payment
     const order2 = await Order.create({
-      userId: user.id,
-      totalAmount: 200.00,
-      status: 'pending',
-      shippingAddress: {
+      user_id: user.id,
+      total_amount: 200.00,
+      order_status: 'pending',
+      shipping_address: {
         street: '456 Test St',
         city: 'Test City',
         country: 'Ethiopia'
@@ -188,9 +188,9 @@ async function testPaymentController() {
     });
 
     const payment2 = await Payment.create({
-      orderId: order2.id,
+      order_id: order2.id,
       amount: 200.00,
-      chapaReference: `test-ref-${Date.now()}`,
+      chapa_tx_ref: `test-ref-${Date.now()}`,
       status: 'pending'
     });
 
@@ -216,7 +216,7 @@ async function testPaymentController() {
       const updatedPayment2 = await Payment.findByPk(payment2.id);
       const updatedOrder2 = await Order.findByPk(order2.id);
       
-      if (updatedPayment2.status === 'failed' && updatedOrder2.status === 'payment_failed') {
+      if (updatedPayment2.status === 'failed' && updatedOrder2.order_status === 'payment_failed') {
         console.log('✓ Failed payment and order status updated correctly');
       } else {
         console.log('✗ Failed payment or order status not updated correctly');

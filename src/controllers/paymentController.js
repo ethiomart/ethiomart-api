@@ -101,7 +101,7 @@ async function initiatePayment(req, res) {
     // Use provided email or order user email
     const customerEmail = email || order.user?.email;
     const customerFirstName = firstName || order.user?.first_name || 'Customer';
-    const customerLastName = lastName || order.user?.last_name || '';
+    const customerLastName = lastName || order.user?.last_name || 'Shopper';
     const customerPhone = phoneNumber || order.user?.phone;
 
     // Property 47: Input Sanitization (handled by validation middleware)

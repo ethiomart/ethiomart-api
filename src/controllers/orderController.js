@@ -136,6 +136,12 @@ const createOrder = async (req, res, next) => {
     });
 
     // Check if cart exists and has items
+    console.log(`🔍 [DEBUG] Checking cart for user ${userId}:`, {
+      cartId: cart?.id,
+      itemCount: cart?.items?.length || 0,
+      hasCart: !!cart
+    });
+
     if (!cart || !cart.items || cart.items.length === 0) {
       await transaction.rollback();
       return res.status(400).json({
@@ -146,9 +152,12 @@ const createOrder = async (req, res, next) => {
 
     // Validate stock for all items
     const stockErrors = [];
+    const orphanedCartItemIds = [];
+
     for (const item of cart.items) {
       if (!item.product) {
-        stockErrors.push(`Product not found for cart item ${item.id}`);
+        console.warn(`[CHECKOUT] Orphaned cart item found: ${item.id}. Product is missing.`);
+        orphanedCartItemIds.push(item.id);
         continue;
       }
 
@@ -167,11 +176,27 @@ const createOrder = async (req, res, next) => {
       if (item.variant_combination_id) {
         const variant = await VariantCombination.findByPk(item.variant_combination_id, { transaction });
         if (!variant) {
-          stockErrors.push(`Variant not found for "${item.product.name}"`);
+          stockErrors.push(`Selected variation for "${item.product.name}" no longer exists`);
         } else if (item.quantity > variant.stock_quantity) {
           stockErrors.push(`Insufficient stock for selected variation of "${item.product.name}". Only ${variant.stock_quantity} items available`);
         }
       }
+    }
+
+    // Clean up orphans if found
+    if (orphanedCartItemIds.length > 0) {
+      console.log(`[CHECKOUT] Cleaning up ${orphanedCartItemIds.length} orphaned items for user ${userId}`);
+      await CartItem.destroy({
+        where: { id: orphanedCartItemIds },
+        transaction
+      });
+      
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Your cart contained invalid items that have been removed. Please review your cart and try again.',
+        errors: [`Removed ${orphanedCartItemIds.length} invalid items`]
+      });
     }
 
     if (stockErrors.length > 0) {
@@ -380,19 +405,14 @@ const createOrder = async (req, res, next) => {
           });
         }
 
-        // Extract first name and last name from user's name
-        const nameParts = (user.name || 'Customer').split(' ');
-        const firstName = nameParts[0] || 'Customer';
-        const lastName = nameParts.slice(1).join(' ') || 'User';
-
         // Initialize payment with Chapa
         paymentInitResult = await chapaService.initializePayment(
           order.id,
           calculatedTotalAmount,
           user.email,
-          user.first_name || 'Customer',
-          user.last_name || 'User',
-          user.phone || null,
+          user.first_name,
+          user.last_name,
+          shippingAddress.phone || user.phone || null,
           mappedPaymentMethod
         );
 
@@ -432,16 +452,13 @@ const createOrder = async (req, res, next) => {
         // Rollback transaction if payment initialization fails
         await transaction.rollback();
         
-        console.error('Payment initialization failed:', {
-          orderId: order.id,
-          error: paymentError.message,
-          timestamp: new Date().toISOString()
-        });
+        console.error('!!!ANTIGRAVITY_ORDER_DEBUG!!! Payment initialization failed details:', paymentError);
 
         return res.status(400).json({
           success: false,
           message: 'Payment initialization failed. Please try again.',
-          error: paymentError.message
+          error: paymentError.message,
+          details: paymentError.toString()
         });
       }
     } else {
@@ -469,42 +486,59 @@ const createOrder = async (req, res, next) => {
     await transaction.commit();
 
     // Fetch created order with details
-    const createdOrder = await Order.findByPk(order.id, {
-      include: [
-        {
-          model: OrderItem,
-          as: 'items',
-          include: [
-            {
-              model: Product,
-              as: 'product',
-              attributes: ['id', 'name', 'price', 'images']
-            },
-            {
-              model: Seller,
-              as: 'seller',
-              attributes: ['id', 'store_name']
-            }
-          ]
-        },
-        {
-          model: Payment,
-          as: 'payment',
-          attributes: ['id', 'payment_method', 'amount', 'currency', 'status', 'chapa_tx_ref']
-        }
-      ]
-    });
+    let createdOrder = null;
+    try {
+      createdOrder = await Order.findByPk(order.id, {
+        include: [
+          {
+            model: OrderItem,
+            as: 'items',
+            include: [
+              {
+                model: Product,
+                as: 'product',
+                attributes: ['id', 'name', 'price', 'images']
+              },
+              {
+                model: Seller,
+                as: 'seller',
+                attributes: ['id', 'store_name']
+              }
+            ]
+          },
+          {
+            model: Payment,
+            as: 'payment',
+            attributes: ['id', 'payment_method', 'amount', 'currency', 'status', 'chapa_tx_ref']
+          }
+        ]
+      });
+    } catch (fetchError) {
+      console.error('!!!ANTIGRAVITY_ORDER_DEBUG!!! Error fetching created order:', fetchError);
+      // Continue with the 'order' object we already have if re-fetch fails
+    }
 
     // Prepare response based on payment method
     const responseData = {
-      order: createdOrder
+      order: createdOrder || order.get({ plain: true })
     };
+
+    // Ensure status fields are present if missing (mapping order_status to status if needed by some clients)
+    if (responseData.order && !responseData.order.status && responseData.order.order_status) {
+      responseData.order.status = responseData.order.order_status;
+    }
 
     // Include payment URL for non-COD orders
     if (paymentInitResult && paymentInitResult.paymentUrl) {
       responseData.paymentUrl = paymentInitResult.paymentUrl;
       responseData.txRef = txRef;
     }
+
+    console.log('Order created successfully and returning response:', {
+      orderId: order.id,
+      hasCreatedOrder: !!createdOrder,
+      paymentMethod: mappedPaymentMethod
+    });
 
     res.status(201).json({
       success: true,

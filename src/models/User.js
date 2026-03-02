@@ -56,6 +56,12 @@ const User = sequelize.define('User', {
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  fullName: {
+    type: DataTypes.VIRTUAL,
+    get() {
+      return `${this.first_name} ${this.last_name}`;
+    }
   }
 }, {
   tableName: 'users',

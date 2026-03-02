@@ -365,10 +365,10 @@ const registerSeller = async (req, res, next) => {
     
     if (req.files) {
       if (req.files.businessLicense) {
-        businessLicenseUrl = `/uploads/${req.files.businessLicense[0].filename}`;
+        businessLicenseUrl = req.files.businessLicense[0].cloudinaryUrl || `/uploads/${req.files.businessLicense[0].filename}`;
       }
       if (req.files.verificationDoc) {
-        verificationDocUrl = `/uploads/${req.files.verificationDoc[0].filename}`;
+        verificationDocUrl = req.files.verificationDoc[0].cloudinaryUrl || `/uploads/${req.files.verificationDoc[0].filename}`;
       }
     }
     

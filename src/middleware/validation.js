@@ -111,16 +111,29 @@ const validateProduct = [
 ];
 
 /**
- * Validation rules for cart item addition/update
- * Requirements: 11.3, 11.4
+ * Validation rules for cart item addition
  */
-const validateCartItem = [
+const validateAddToCart = [
   body('productId')
     .notEmpty()
     .withMessage('Product ID is required')
     .isInt()
     .withMessage('Product ID must be an integer'),
   
+  body('quantity')
+    .isInt({ min: 1 })
+    .withMessage('Quantity must be a positive integer'),
+    
+  body('variantCombinationId')
+    .optional()
+    .isInt()
+    .withMessage('Variant combination ID must be an integer')
+];
+
+/**
+ * Validation rules for cart item update
+ */
+const validateUpdateCartItem = [
   body('quantity')
     .isInt({ min: 1 })
     .withMessage('Quantity must be a positive integer')
@@ -581,7 +594,8 @@ module.exports = {
   validateRegistration,
   validateLogin,
   validateProduct,
-  validateCartItem,
+  validateAddToCart,
+  validateUpdateCartItem,
   validateOrder,
   validateReview,
   validateWishlistItem,

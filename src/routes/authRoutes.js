@@ -4,6 +4,7 @@ const authController = require('../controllers/authController');
 const { verifyToken } = require('../middleware/auth');
 const { validateRegistration, validateLogin, validateSellerRegistration, handleValidationErrors } = require('../middleware/validation');
 const { upload } = require('../middleware/upload');
+const { cloudinaryUpload } = require('../middleware/cloudinaryUpload');
 
 // POST /api/auth/register - Register new user
 router.post('/register', validateRegistration, handleValidationErrors, authController.register);
@@ -15,6 +16,7 @@ router.post('/register-seller',
     { name: 'businessLicense', maxCount: 1 },
     { name: 'verificationDoc', maxCount: 1 }
   ]),
+  cloudinaryUpload('sellers/docs'),
   validateSellerRegistration, 
   handleValidationErrors, 
   authController.registerSeller

@@ -43,6 +43,14 @@ const Seller = sequelize.define('Seller', {
     type: DataTypes.STRING(100),
     allowNull: true
   },
+  business_license_url: {
+    type: DataTypes.STRING(255),
+    allowNull: true
+  },
+  verification_doc_url: {
+    type: DataTypes.STRING(255),
+    allowNull: true
+  },
   tax_id: {
     type: DataTypes.STRING(50),
     allowNull: true

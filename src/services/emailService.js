@@ -7,14 +7,26 @@ const nodemailer = require('nodemailer');
 
 // Create reusable transporter
 const createTransporter = () => {
+  const user = process.env.EMAIL_USER;
+  const pass = process.env.EMAIL_PASS;
+
+  // Check for placeholder credentials
+  if (!user || user === 'your-email@gmail.com' || !pass || pass === 'your-app-password') {
+    return null;
+  }
+
   return nodemailer.createTransport({
     host: process.env.EMAIL_HOST || 'smtp.gmail.com',
     port: parseInt(process.env.EMAIL_PORT) || 587,
     secure: false, // true for 465, false for other ports
     auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
+      user: user,
+      pass: pass,
     },
+    // Add timeout to prevent hanging
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 10000
   });
 };
 
@@ -62,6 +74,11 @@ const sendEmail = async (to, subject, html, attachments = []) => {
   try {
     const transporter = createTransporter();
     
+    if (!transporter) {
+      console.warn('📧 Email Service: Skipping email send - placeholders detected in credentials.');
+      return { success: false, message: 'Skipped due to missing credentials' };
+    }
+    
     const mailOptions = {
       from: process.env.EMAIL_FROM || 'noreply@ecommerce.com',
       to,
@@ -74,8 +91,12 @@ const sendEmail = async (to, subject, html, attachments = []) => {
     console.log('Email sent:', info.messageId);
     return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.error('Error sending email:', error);
-    throw error;
+    if (error.code === 'EAUTH') {
+      console.error('📧 Email Service: Authentication failed. Please check EMAIL_USER and EMAIL_PASS in .env.');
+    } else {
+      console.error('Error sending email:', error.message);
+    }
+    return { success: false, error: error.message };
   }
 };
 

@@ -1,4 +1,5 @@
 const { Banner, StaticPage, sequelize } = require('../../models');
+const { deleteFromCloudinary } = require('../../utils/cloudinaryUtils');
 
 /**
  * Banners
@@ -23,7 +24,7 @@ exports.createBanner = async (req, res, next) => {
 
     const banner = await Banner.create({
       title,
-      image_url: req.file.path,
+      image_url: req.fileUrl || req.file.path,
       link_url,
       position,
       sort_order: sort_order || 0
@@ -46,7 +47,11 @@ exports.updateBanner = async (req, res, next) => {
 
     const updateData = { title, link_url, position, sort_order, is_active };
     if (req.file) {
-      updateData.image_url = req.file.path;
+      // Delete old image from Cloudinary if it exists
+      if (banner.image_url) {
+        await deleteFromCloudinary(banner.image_url);
+      }
+      updateData.image_url = req.fileUrl || req.file.path;
     }
 
     await banner.update(updateData);
@@ -61,6 +66,11 @@ exports.deleteBanner = async (req, res, next) => {
     const banner = await Banner.findByPk(req.params.id);
     if (!banner) {
       return res.status(404).json({ success: false, message: 'Banner not found' });
+    }
+
+    // Delete image from Cloudinary before destroying banner
+    if (banner.image_url) {
+      await deleteFromCloudinary(banner.image_url);
     }
 
     await banner.destroy();

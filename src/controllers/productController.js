@@ -5,6 +5,7 @@ const User = require('../models/User');
 const { Op } = require('sequelize');
 const sequelize = require('../config/database');
 const { transformImageUrls } = require('../utils/imageUtils');
+const { deleteMultipleFromCloudinary } = require('../utils/cloudinaryUtils');
 
 
 /**
@@ -89,9 +90,12 @@ const createProduct = async (req, res, next) => {
 
     // Handle uploaded images
     let images = [];
-    if (req.files && req.files.length > 0) {
+    if (req.fileUrls && req.fileUrls.length > 0) {
+      images = req.fileUrls;
+      console.log('Uploaded Cloudinary images:', images);
+    } else if (req.files && req.files.length > 0) {
       images = req.files.map(file => `/uploads/${file.filename}`);
-      console.log('Uploaded images:', images);
+      console.log('Uploaded local images:', images);
     }
 
     // Create product
@@ -352,9 +356,26 @@ const updateProduct = async (req, res, next) => {
 
     // Handle uploaded images
     let images = product.images || [];
-    if (req.files && req.files.length > 0) {
+    if (req.fileUrls && req.fileUrls.length > 0) {
+      images = [...images, ...req.fileUrls];
+    } else if (req.files && req.files.length > 0) {
       const newImages = req.files.map(file => `/uploads/${file.filename}`);
       images = [...images, ...newImages];
+    }
+
+    // Handle image removal (Admin/Seller can pass remaining images)
+    const { existing_images, existingImages } = req.body;
+    const imagesToKeep = existingImages || existing_images;
+    
+    if (imagesToKeep) {
+      const parsedImagesToKeep = typeof imagesToKeep === 'string' ? JSON.parse(imagesToKeep) : imagesToKeep;
+      
+      // Identify images to delete
+      const imagesToDelete = product.images.filter(img => !parsedImagesToKeep.includes(img));
+      if (imagesToDelete.length > 0) {
+        await deleteMultipleFromCloudinary(imagesToDelete);
+      }
+      images = [...parsedImagesToKeep, ...(req.fileUrls || [])];
     }
 
     // Update product fields
@@ -366,7 +387,9 @@ const updateProduct = async (req, res, next) => {
     if (finalCategoryId !== undefined) updateData.category_id = finalCategoryId;
     if (isActive !== undefined) updateData.is_published = isActive === 'true' || isActive === true;
     if (is_published !== undefined) updateData.is_published = is_published === 'true' || is_published === true;
-    if (req.files && req.files.length > 0) updateData.images = images;
+    
+    // Always update images if we've recalculated them (handles Cloudinary and removals)
+    updateData.images = images;
 
     await product.update(updateData);
 
@@ -433,6 +456,11 @@ const deleteProduct = async (req, res, next) => {
         success: false,
         message: 'You are not authorized to delete this product'
       });
+    }
+
+    // Delete images from Cloudinary before destroying product
+    if (product.images && product.images.length > 0) {
+      await deleteMultipleFromCloudinary(product.images);
     }
 
     await product.destroy();

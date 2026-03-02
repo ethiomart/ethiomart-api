@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router({ mergeParams: true }); // mergeParams to access :productId from parent router
 const variantController = require('../controllers/variantController');
 const { verifyToken, requireRole } = require('../middleware/auth');
-const { uploadVariantImage } = require('../middleware/upload');
+const { uploadSingle } = require('../middleware/upload');
+const { cloudinaryUpload } = require('../middleware/cloudinaryUpload');
 const {
   validateCreateOptions,
   validateUpdateCombination,
@@ -125,7 +126,8 @@ router.post(
   '/:variantId/image',
   verifyToken,
   requireRole(['seller']),
-  uploadVariantImage,
+  uploadSingle('image'),
+  cloudinaryUpload('products/variants'),
   variantController.uploadVariantImage
 );
 

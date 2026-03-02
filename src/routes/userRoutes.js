@@ -3,9 +3,10 @@ const router = express.Router();
 const userController = require('../controllers/userController');
 const { verifyToken, requireRole } = require('../middleware/auth');
 const { uploadSingle } = require('../middleware/upload');
+const { cloudinaryUpload } = require('../middleware/cloudinaryUpload');
 
 // POST /api/users/profile-picture - Upload profile picture
-router.post('/profile-picture', verifyToken, uploadSingle('profilePicture'), userController.uploadProfilePicture);
+router.post('/profile-picture', verifyToken, uploadSingle('profilePicture'), cloudinaryUpload('users/avatars'), userController.uploadProfilePicture);
 
 // GET /api/users - Admin: Get all users
 router.get('/', verifyToken, requireRole(['admin']), userController.getAllUsers);

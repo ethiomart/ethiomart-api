@@ -2,6 +2,7 @@ const variantService = require('../services/variantService');
 const variantAnalyticsService = require('../services/variantAnalyticsService');
 const Product = require('../models/Product');
 const Seller = require('../models/Seller');
+const { deleteFromCloudinary } = require('../utils/cloudinaryUtils');
 
 /**
  * Variant Controller
@@ -320,6 +321,10 @@ const deleteVariantCombination = async (req, res, next) => {
       });
     }
 
+    if (variant.image_url) {
+      await deleteFromCloudinary(variant.image_url);
+    }
+
     await variant.destroy();
 
     res.status(200).json({
@@ -502,16 +507,23 @@ const uploadVariantImage = async (req, res, next) => {
     }
 
     // Check if image was uploaded
-    if (!req.variantImageUrl) {
+    const imageUrl = req.fileUrl || req.variantImageUrl;
+    if (!imageUrl) {
       return res.status(400).json({
         success: false,
         message: 'No image file provided'
       });
     }
 
+    // Delete old image from Cloudinary if it exists
+    const variant = await require('../models/VariantCombination').findByPk(variantId);
+    if (variant && variant.image_url) {
+      await deleteFromCloudinary(variant.image_url);
+    }
+
     // Update variant with image URL
     const updates = {
-      image_url: req.variantImageUrl
+      image_url: imageUrl
     };
 
     const result = await variantService.updateVariantCombination(
@@ -525,7 +537,7 @@ const uploadVariantImage = async (req, res, next) => {
       success: true,
       message: 'Variant image uploaded successfully',
       data: {
-        image_url: req.variantImageUrl,
+        image_url: imageUrl,
         variant: result.data
       }
     });

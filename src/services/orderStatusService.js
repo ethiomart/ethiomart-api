@@ -5,8 +5,8 @@ const emailService = require('./emailService');
 class OrderStatusService {
   // Valid status transitions
   VALID_TRANSITIONS = {
-    'pending': ['paid', 'cancelled'],
-    'paid': ['processing', 'cancelled'],
+    'pending': ['confirmed', 'cancelled'],
+    'confirmed': ['processing', 'cancelled'],
     'processing': ['packed', 'cancelled'],
     'packed': ['shipped', 'cancelled'],
     'shipped': ['in_transit', 'delivered', 'cancelled'],
@@ -19,8 +19,8 @@ class OrderStatusService {
   PERMISSIONS = {
     'seller': ['processing', 'packed', 'shipped', 'in_transit'],
     'fulfillment': ['packed', 'shipped', 'in_transit', 'delivered'],
-    'admin': ['processing', 'packed', 'shipped', 'in_transit', 'delivered', 'cancelled'],
-    'system': ['paid', 'cancelled']
+    'admin': ['confirmed', 'processing', 'packed', 'shipped', 'in_transit', 'delivered', 'cancelled'],
+    'system': ['confirmed', 'cancelled']
   };
 
   /**
@@ -38,7 +38,12 @@ class OrderStatusService {
     }
 
     // Validate transition
-    if (!this.VALID_TRANSITIONS[order.order_status].includes(newStatus)) {
+    if (!this.VALID_TRANSITIONS[order.order_status]) {
+      // If current status is not in VALID_TRANSITIONS, allow transition to 'confirmed' or 'cancelled' as recovery
+      if (newStatus !== 'confirmed' && newStatus !== 'cancelled') {
+         throw new Error(`Invalid current status: ${order.order_status}. No transitions allowed except to confirmed or cancelled.`);
+      }
+    } else if (!this.VALID_TRANSITIONS[order.order_status].includes(newStatus)) {
       throw new Error(`Invalid status transition from ${order.order_status} to ${newStatus}`);
     }
 
@@ -79,7 +84,7 @@ class OrderStatusService {
     if (!customer) return;
 
     const statusMessages = {
-      'paid': 'Your payment has been confirmed',
+      'confirmed': 'Your order has been confirmed',
       'processing': 'Your order is being processed',
       'packed': 'Your order has been packed',
       'shipped': 'Your order has been shipped',

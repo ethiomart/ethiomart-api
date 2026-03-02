@@ -1,4 +1,5 @@
 const { Category, Product, sequelize } = require('../../models');
+const { deleteFromCloudinary } = require('../../utils/cloudinaryUtils');
 
 /**
  * Get all categories (Admin)
@@ -26,7 +27,7 @@ exports.getAllCategories = async (req, res, next) => {
 exports.createCategory = async (req, res, next) => {
   try {
     const { name, slug, description, parentId, status } = req.body;
-    const image = req.file ? req.file.path : null;
+    const image = req.fileUrl || (req.file ? req.file.path : null);
 
     const category = await Category.create({
       name,
@@ -64,7 +65,11 @@ exports.updateCategory = async (req, res, next) => {
     };
 
     if (req.file) {
-      updateData.image = req.file.path;
+      // Delete old image from Cloudinary if it exists
+      if (category.image) {
+        await deleteFromCloudinary(category.image);
+      }
+      updateData.image = req.fileUrl || req.file.path;
     }
 
     await category.update(updateData);
@@ -104,6 +109,11 @@ exports.deleteCategory = async (req, res, next) => {
         hasChildren: true,
         childrenCount: childrenCount
       });
+    }
+
+    // Delete image from Cloudinary before destroying category
+    if (category.image) {
+      await deleteFromCloudinary(category.image);
     }
 
     await category.destroy();

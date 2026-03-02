@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const { transformImageUrls } = require('../utils/imageUtils');
+const { deleteFromCloudinary } = require('../utils/cloudinaryUtils');
 
 /**
  * Upload profile picture
@@ -28,6 +29,11 @@ const uploadProfilePicture = async (req, res, next) => {
         success: false,
         message: 'User not found'
       });
+    }
+
+    // Delete old profile picture if it exists and is a Cloudinary URL
+    if (user.profile_picture_url) {
+      await deleteFromCloudinary(user.profile_picture_url);
     }
 
     await user.update({ profile_picture_url: profilePictureUrl });

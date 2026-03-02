@@ -2,16 +2,16 @@ const express = require('express');
 const router = express.Router();
 const cartController = require('../controllers/cartController');
 const { verifyToken } = require('../middleware/auth');
-const { validateCartItem, handleValidationErrors } = require('../middleware/validation');
+const { validateAddToCart, validateUpdateCartItem, handleValidationErrors } = require('../middleware/validation');
 
 // GET /api/cart - Get user's cart
 router.get('/', verifyToken, cartController.getCart);
 
 // POST /api/cart/items - Add item to cart
-router.post('/items', verifyToken, validateCartItem, handleValidationErrors, cartController.addToCart);
+router.post('/items', verifyToken, validateAddToCart, handleValidationErrors, cartController.addToCart);
 
 // PUT /api/cart/items/:id - Update cart item
-router.put('/items/:id', verifyToken, validateCartItem, handleValidationErrors, cartController.updateCartItem);
+router.put('/items/:id', verifyToken, validateUpdateCartItem, handleValidationErrors, cartController.updateCartItem);
 
 // DELETE /api/cart/items/:id - Remove cart item
 router.delete('/items/:id', verifyToken, cartController.removeFromCart);

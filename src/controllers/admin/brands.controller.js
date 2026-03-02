@@ -1,4 +1,5 @@
 const { Brand, Product } = require('../../models');
+const { deleteFromCloudinary } = require('../../utils/cloudinaryUtils');
 
 /**
  * Get all brands
@@ -20,7 +21,7 @@ exports.getBrands = async (req, res, next) => {
 exports.createBrand = async (req, res, next) => {
   try {
     const { name, slug, description } = req.body;
-    const logo = req.file ? req.file.path : null;
+    const logo = req.fileUrl || (req.file ? req.file.path : null);
 
     const brand = await Brand.create({
       name,
@@ -49,7 +50,11 @@ exports.updateBrand = async (req, res, next) => {
 
     const updateData = { name, slug, description, is_active };
     if (req.file) {
-      updateData.logo = req.file.path;
+      // Delete old logo from Cloudinary
+      if (brand.logo) {
+        await deleteFromCloudinary(brand.logo);
+      }
+      updateData.logo = req.fileUrl || req.file.path;
     }
 
     await brand.update(updateData);
@@ -73,6 +78,11 @@ exports.deleteBrand = async (req, res, next) => {
     const productCount = await Product.count({ where: { brand_id: brand.id } });
     if (productCount > 0) {
       return res.status(400).json({ success: false, message: 'Cannot delete brand with associated products' });
+    }
+
+    // Delete logo from Cloudinary before destroying brand
+    if (brand.logo) {
+      await deleteFromCloudinary(brand.logo);
     }
 
     await brand.destroy();

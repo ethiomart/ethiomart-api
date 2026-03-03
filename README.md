@@ -193,7 +193,7 @@ This project is licensed under the ISC License.
 
 ## Support
 
-For support, email adaneyohannes11@gmail.com.com or open an issue in the repository.
+For support, email adaneyohannes11@gmail.com or open an issue in the repository.
 
 ## Acknowledgments
 

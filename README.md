@@ -1,4 +1,4 @@
-# EthioMart Backend
+# EthioMart Api
 
 A robust e-commerce backend API built with Node.js, Express, and MySQL, featuring comprehensive product management, order processing, payment integration, and multi-vendor support.
 

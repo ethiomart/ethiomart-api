@@ -59,56 +59,19 @@ exports.getTransactions = async (req, res, next) => {
 
     // Format the response with comprehensive transaction details
     const formattedTransactions = transactions.map(payment => ({
-      // Payment fields - all fields from Payment model
       id: payment.id,
-      order_id: payment.order_id,
-      transaction_id: payment.transaction_id,
-      chapa_tx_ref: payment.chapa_tx_ref,
-      payment_method: payment.payment_method,
-      amount: payment.amount,
+      transactionId: payment.transaction_id || payment.chapa_tx_ref,
+      orderId: payment.order_id,
+      orderNumber: payment.order?.order_number,
+      amount: parseFloat(payment.amount),
       currency: payment.currency,
+      paymentMethod: payment.payment_method,
+      paymentStatus: payment.status,
       status: payment.status,
-      paid_at: payment.paid_at,
-      refunded_at: payment.refunded_at,
-      refund_reason: payment.refund_reason,
-      created_at: payment.created_at,
-      updated_at: payment.updated_at,
-      chapa_response: payment.chapa_response,
-      payment_data: payment.payment_data,
-      
-      // Order details with full associations
-      order: payment.order ? {
-        id: payment.order.id,
-        order_number: payment.order.order_number,
-        total_amount: payment.order.total_amount,
-        order_status: payment.order.order_status,
-        created_at: payment.order.created_at,
-        
-        // Customer information
-        customer: payment.order.user ? {
-          id: payment.order.user.id,
-          name: `${payment.order.user.first_name} ${payment.order.user.last_name}`,
-          email: payment.order.user.email,
-          phone: payment.order.user.phone
-        } : null,
-        
-        // Order items with product and seller details
-        items: payment.order.items ? payment.order.items.map(item => ({
-          id: item.id,
-          product_id: item.product_id,
-          product_name: item.product?.name,
-          product_sku: item.product?.sku,
-          product_image: item.product?.images?.[0] || null,
-          quantity: item.quantity,
-          price: item.price_at_purchase,
-          
-          // Seller information
-          seller: item.seller ? {
-            id: item.seller.id,
-            store_name: item.seller.store_name,
-            email: item.seller.business_email
-          } : null
-        })) : []
+      createdAt: payment.created_at,
+      customer: payment.order?.user ? {
+        fullName: `${payment.order.user.first_name} ${payment.order.user.last_name}`,
+        email: payment.order.user.email
       } : null
     }));
 
@@ -155,7 +118,31 @@ exports.getPaymentLogs = async (req, res, next) => {
       limit: 50,
       order: [['updated_at', 'DESC']]
     });
-    res.json({ success: true, data: logs });
+
+    const formattedLogs = logs.map(payment => {
+      let level = 'info';
+      let message = `Payment of ${payment.amount} ${payment.currency} for order #${payment.order_id}`;
+      
+      if (payment.status === 'success') {
+        level = 'success';
+        message = `Successfully processed payment for order #${payment.order_id}`;
+      } else if (payment.status === 'failed') {
+        level = 'error';
+        message = `Failed payment attempt for order #${payment.order_id}`;
+      }
+
+      return {
+        id: payment.id,
+        timestamp: payment.updated_at,
+        transactionId: payment.chapa_tx_ref || payment.transaction_id || 'N/A',
+        status: payment.status,
+        level: level,
+        message: message,
+        errorDetails: payment.chapa_response?.message || payment.chapa_response?.error || '-',
+        source: payment.payment_method || 'Chapa'
+      };
+    });
+    res.json({ success: true, data: formattedLogs });
   } catch (error) {
     next(error);
   }

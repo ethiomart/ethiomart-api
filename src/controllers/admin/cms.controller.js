@@ -17,35 +17,81 @@ exports.getBanners = async (req, res, next) => {
 
 exports.createBanner = async (req, res, next) => {
   try {
-    const { title, link_url, position, sort_order } = req.body;
+    console.log('Create Banner Request:', {
+      contentType: req.headers['content-type'],
+      body: req.body,
+      file: req.file ? req.file.originalname : 'Missing',
+      fileUrl: req.fileUrl
+    });
+
+    const { 
+      title, 
+      linkValue, 
+      linkType,
+      position, 
+      sortOrder, 
+      startDate, 
+      endDate, 
+      status 
+    } = req.body;
+
     if (!req.file) {
+      console.log('Validation Error: Banner image is required but missing.');
       return res.status(400).json({ success: false, message: 'Banner image is required' });
     }
 
     const banner = await Banner.create({
       title,
       image_url: req.fileUrl || req.file.path,
-      link_url,
+      link_url: linkValue, // Mapping linkValue to link_url
       position,
-      sort_order: sort_order || 0
+      sort_order: sortOrder || 0,
+      start_date: startDate,
+      end_date: endDate || null,
+      is_active: status === 'active'
     });
 
     res.status(201).json({ success: true, data: banner });
   } catch (error) {
+    console.error('Create Banner Error:', error);
     next(error);
   }
 };
 
 exports.updateBanner = async (req, res, next) => {
   try {
-    const { title, link_url, position, sort_order, is_active } = req.body;
+    console.log(`Update Banner Request for ID ${req.params.id}:`, {
+      contentType: req.headers['content-type'],
+      body: req.body,
+      file: req.file ? req.file.originalname : 'Not changed'
+    });
+    const { 
+      title, 
+      linkValue, 
+      linkType,
+      position, 
+      sortOrder, 
+      startDate, 
+      endDate, 
+      status 
+    } = req.body;
+    
     const banner = await Banner.findByPk(req.params.id);
 
     if (!banner) {
       return res.status(404).json({ success: false, message: 'Banner not found' });
     }
 
-    const updateData = { title, link_url, position, sort_order, is_active };
+    const updateData = { 
+      title, 
+      link_url: linkValue, 
+      position, 
+      sort_order: sortOrder,
+      start_date: startDate,
+      end_date: endDate || null,
+      is_active: status === 'active'
+    };
+
     if (req.file) {
       // Delete old image from Cloudinary if it exists
       if (banner.image_url) {

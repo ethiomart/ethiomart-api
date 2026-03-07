@@ -37,10 +37,26 @@ exports.getAllOrders = async (req, res, next) => {
       order: [['created_at', 'DESC']]
     });
 
+    const formattedOrders = orders.map(order => ({
+      id: order.id,
+      orderNumber: order.order_number,
+      status: order.order_status,
+      totalAmount: parseFloat(order.total_amount),
+      createdAt: order.created_at,
+      paymentMethod: order.payment_method,
+      paymentStatus: order.payment_status,
+      itemCount: order.items?.length || 0,
+      customer: order.user ? {
+        fullName: `${order.user.first_name} ${order.user.last_name}`,
+        email: order.user.email
+      } : null,
+      items: order.items
+    }));
+
     res.json({
       success: true,
       data: {
-        orders,
+        orders: formattedOrders,
         pagination: {
           total: count,
           page: parseInt(page),
@@ -75,7 +91,51 @@ exports.getOrderById = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
 
-    res.json({ success: true, data: order });
+    const formattedOrder = {
+      id: order.id,
+      orderNumber: order.order_number,
+      status: order.order_status,
+      totalAmount: parseFloat(order.total_amount),
+      subtotal: parseFloat(order.subtotal),
+      shippingCost: parseFloat(order.shipping_cost),
+      tax: parseFloat(order.tax_amount),
+      discount: parseFloat(order.discount_amount),
+      paymentMethod: order.payment_method,
+      paymentStatus: order.payment_status,
+      notes: order.notes,
+      createdAt: order.created_at,
+      updatedAt: order.updated_at,
+      customer: order.user ? {
+        id: order.user.id,
+        fullName: `${order.user.first_name} ${order.user.last_name}`,
+        email: order.user.email,
+        phone: order.user.phone
+      } : null,
+      shippingAddress: order.address ? {
+        fullName: order.address.full_name,
+        addressLine1: order.address.street_address,
+        city: order.address.city,
+        state: order.address.state,
+        postalCode: order.address.postal_code,
+        country: order.address.country,
+        phone: order.address.phone
+      } : null,
+      items: order.items ? order.items.map(item => ({
+        id: item.id,
+        price: parseFloat(item.price_at_purchase),
+        quantity: item.quantity,
+        product: item.product ? {
+          id: item.product.id,
+          name: item.product.name,
+          sku: item.product.sku,
+          image: item.product.images?.[0]
+        } : null
+      })) : [],
+      payment: order.payment,
+      timeline: order.statusHistory || []
+    };
+
+    res.json({ success: true, order: formattedOrder });
   } catch (error) {
     next(error);
   }
@@ -100,9 +160,7 @@ exports.updateOrderStatus = async (req, res, next) => {
     res.status(200).json({
       success: true,
       message: 'Order status updated successfully',
-      data: {
-        order: updatedOrder
-      }
+      order: updatedOrder
     });
   } catch (error) {
     if (error.message.includes('Invalid status transition') || error.message.includes('cannot set status')) {

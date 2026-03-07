@@ -71,7 +71,7 @@ const Order = sequelize.define('Order', {
     }
   },
   payment_method: {
-    type: DataTypes.ENUM('card', 'mobile_money', 'bank_transfer', 'cod'),
+    type: DataTypes.ENUM('card', 'mobile_money', 'bank_transfer', 'cod', 'unknown', 'other'),
     allowNull: true
   },
   payment_status: {

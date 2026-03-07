@@ -1,13 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const cmsController = require('../../controllers/admin/cms.controller');
-const { upload } = require('../../middleware/upload');
+const { upload, uploadSingle } = require('../../middleware/upload');
 const { cloudinaryUpload } = require('../../middleware/cloudinaryUpload');
 
 // Banners
 router.get('/banners', cmsController.getBanners);
-router.post('/banners', upload.single('image'), cloudinaryUpload('admin/banners'), cmsController.createBanner);
-router.put('/banners/:id', upload.single('image'), cloudinaryUpload('admin/banners'), cmsController.updateBanner);
+router.post('/banners', uploadSingle('image'), cloudinaryUpload('admin/banners'), cmsController.createBanner);
+router.put('/banners/:id', uploadSingle('image'), cloudinaryUpload('admin/banners'), cmsController.updateBanner);
 router.delete('/banners/:id', cmsController.deleteBanner);
 router.put('/banners/reorder', cmsController.reorderBanners);
 

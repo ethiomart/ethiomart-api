@@ -246,8 +246,14 @@ const sendPaymentReceipt = async (payment) => {
   try {
     const transporter = createTransporter();
     
-    const order = payment.Order;
-    const user = order.User;
+    const order = payment.Order || payment.order;
+    if (!order) {
+      throw new Error('Payment object must include an Order or order association');
+    }
+    const user = order.User || order.user;
+    if (!user) {
+      throw new Error('Order object must include a User or user association');
+    }
     
     const mailOptions = {
       from: process.env.EMAIL_FROM || 'noreply@ecommerce.com',

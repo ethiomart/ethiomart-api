@@ -638,8 +638,18 @@ async function verifyPayment(reference) {
     if (response.data && response.data.status === 'success') {
       const data = response.data.data;
       
+      // Normalize status (Property 17)
+      let normalizedStatus = data.status;
+      if (data.status === 'success' || data.status === 'paid') {
+        normalizedStatus = 'success';
+      } else if (data.status === 'failed' || data.status === 'failed/cancelled' || data.status === 'cancelled') {
+        normalizedStatus = 'failed';
+      } else {
+        normalizedStatus = 'pending';
+      }
+
       const paymentDetails = {
-        status: data.status, // 'success' or 'failed'
+        status: normalizedStatus,
         amount: parseFloat(data.amount),
         currency: data.currency,
         reference: data.tx_ref,
@@ -649,23 +659,8 @@ async function verifyPayment(reference) {
         chargedAmount: parseFloat(data.charge) || 0
       };
 
-      // Send receipt to customer if payment successful
-      if (data.status === 'success' && chapaConfig.sendReceiptsToCustomers) {
-        try {
-          await emailService.sendPaymentReceipt({
-            email: data.email,
-            firstName: data.first_name,
-            lastName: data.last_name,
-            amount: data.amount,
-            currency: data.currency,
-            reference: data.tx_ref,
-            paymentMethod: data.payment_method,
-            transactionDate: new Date().toLocaleString()
-          });
-        } catch (emailError) {
-          console.error('Failed to send customer receipt:', emailError.message);
-        }
-      }
+      // Note: Receipt sending is now handled in finalizePaymentSuccess in paymentController.js
+      // to ensure consistency across all verification methods (webhook/polling).
 
       // Send transaction notification to finance email
       if (chapaConfig.sendTransactionReceipts) {

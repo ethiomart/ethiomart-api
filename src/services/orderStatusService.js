@@ -7,19 +7,19 @@ class OrderStatusService {
   VALID_TRANSITIONS = {
     'pending': ['confirmed', 'cancelled'],
     'confirmed': ['processing', 'cancelled'],
-    'processing': ['packed', 'cancelled'],
-    'packed': ['shipped', 'cancelled'],
-    'shipped': ['in_transit', 'delivered', 'cancelled'],
-    'in_transit': ['delivered', 'cancelled'],
-    'delivered': [],
-    'cancelled': []
+    'processing': ['shipped', 'cancelled'],
+    'shipped': ['out_for_delivery', 'delivered', 'cancelled'],
+    'out_for_delivery': ['delivered', 'returned', 'cancelled'],
+    'delivered': ['returned'],
+    'cancelled': [],
+    'returned': []
   };
 
   // Who can update status
   PERMISSIONS = {
-    'seller': ['processing', 'packed', 'shipped', 'in_transit'],
-    'fulfillment': ['packed', 'shipped', 'in_transit', 'delivered'],
-    'admin': ['confirmed', 'processing', 'packed', 'shipped', 'in_transit', 'delivered', 'cancelled'],
+    'seller': ['confirmed', 'processing', 'shipped', 'out_for_delivery'],
+    'fulfillment': ['shipped', 'out_for_delivery', 'delivered'],
+    'admin': ['confirmed', 'processing', 'shipped', 'out_for_delivery', 'delivered', 'cancelled', 'returned'],
     'system': ['confirmed', 'cancelled']
   };
 
@@ -37,19 +37,22 @@ class OrderStatusService {
       throw new Error(`Order ${orderId} not found`);
     }
 
-    // Validate transition
-    if (!this.VALID_TRANSITIONS[order.order_status]) {
-      // If current status is not in VALID_TRANSITIONS, allow transition to 'confirmed' or 'cancelled' as recovery
-      if (newStatus !== 'confirmed' && newStatus !== 'cancelled') {
-         throw new Error(`Invalid current status: ${order.order_status}. No transitions allowed except to confirmed or cancelled.`);
-      }
-    } else if (!this.VALID_TRANSITIONS[order.order_status].includes(newStatus)) {
-      throw new Error(`Invalid status transition from ${order.order_status} to ${newStatus}`);
-    }
-
-    // Validate permissions
+    // Validate permissions first
     if (!this.PERMISSIONS[updatedBy.role].includes(newStatus)) {
       throw new Error(`${updatedBy.role} cannot set status to ${newStatus}`);
+    }
+
+    // Validate transition
+    // Admin can bypass sequential checks if the Target Status is in their PERMISSIONS
+    if (updatedBy.role !== 'admin') {
+      if (!this.VALID_TRANSITIONS[order.order_status]) {
+        // If current status is not in VALID_TRANSITIONS, allow transition to 'confirmed' or 'cancelled' as recovery
+        if (newStatus !== 'confirmed' && newStatus !== 'cancelled') {
+           throw new Error(`Invalid current status: ${order.order_status}. No transitions allowed except to confirmed or cancelled.`);
+        }
+      } else if (!this.VALID_TRANSITIONS[order.order_status].includes(newStatus)) {
+        throw new Error(`Invalid status transition from ${order.order_status} to ${newStatus}`);
+      }
     }
 
     const oldStatus = order.order_status;
@@ -86,18 +89,20 @@ class OrderStatusService {
     const statusMessages = {
       'confirmed': 'Your order has been confirmed',
       'processing': 'Your order is being processed',
-      'packed': 'Your order has been packed',
       'shipped': 'Your order has been shipped',
-      'in_transit': 'Your order is on the way',
-      'delivered': 'Your order has been delivered'
+      'out_for_delivery': 'Your order is out for delivery',
+      'delivered': 'Your order has been delivered',
+      'cancelled': 'Your order has been cancelled',
+      'returned': 'Your order has been returned'
     };
 
-    const message = statusMessages[status];
+    const message = statusMessages[status] || `Your order status has been updated to ${status}`;
     const appUrl = process.env.CUSTOMER_APP_URL || 'http://localhost:3000';
     const trackingUrl = trackingInfo.trackingNumber 
       ? `${appUrl}/track/${order.id}`
       : null;
 
+    // 1. Notify Customer
     // Email notification
     try {
       await emailService.sendStatusUpdate({
@@ -111,10 +116,10 @@ class OrderStatusService {
         trackingUrl: trackingUrl
       });
     } catch (err) {
-      console.error('Failed to send status update email', err);
+      console.error('Failed to send status update email to customer', err);
     }
 
-    // SMS notification (if phone provided)
+    // SMS notification
     if (customer.phone) {
       try {
         await notificationService.sendSMS({
@@ -128,12 +133,60 @@ class OrderStatusService {
       }
     }
 
-    // Push notification (via existing notificationService mechanisms)
+    // Push notification
     try {
-      // The old notification system internally checks for FCM token and sends push notification
       await notificationService.notifyOrderStatus(customer.id, order.id, status);
     } catch (err) {
       console.error('Failed to send status push notification', err);
+    }
+
+    // 2. Notify Sellers
+    try {
+      const { OrderItem, Seller, User: UserAlias } = require('../models');
+      const orderItems = await OrderItem.findAll({
+        where: { order_id: order.id },
+        include: [{ 
+          model: Seller, 
+          as: 'seller',
+          include: [{ model: UserAlias, as: 'user', attributes: ['id', 'email'] }]
+        }]
+      });
+
+      const uniqueSellers = new Set();
+      const sellerList = [];
+
+      for (const item of orderItems) {
+        if (item.seller && !uniqueSellers.has(item.seller_id)) {
+          uniqueSellers.add(item.seller_id);
+          sellerList.push(item.seller);
+        }
+      }
+
+      for (const seller of sellerList) {
+        const sellerTitle = `Order #${order.id} Update`;
+        const sellerMessage = `Order #${order.id} containing your products has been updated to: ${status}`;
+        
+        // In-app / Push
+        await notificationService.notifySeller(seller.id, sellerMessage, sellerTitle, order.id, 'order');
+
+        // Email to seller
+        if (seller.user && seller.user.email) {
+          await emailService.sendEmail(
+            seller.user.email,
+            `Order Update - #${order.id}`,
+            `
+              <div style="font-family: Arial, sans-serif; padding: 20px;">
+                <h2>Order Update Notification</h2>
+                <p>Hello ${seller.store_name},</p>
+                <p>Order <strong>#${order.id}</strong> (containing items from your store) has changed status to: <strong>${status}</strong>.</p>
+                <p>Please log in to your dashboard for more details.</p>
+              </div>
+            `
+          );
+        }
+      }
+    } catch (err) {
+      console.error('Failed to notify sellers about order status update', err);
     }
   }
 }

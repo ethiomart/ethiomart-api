@@ -27,6 +27,7 @@ const reviewRoutes = require('./routes/reviewRoutes');
 const chapaRoutes = require('./routes/chapaRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const addressRoutes = require('./routes/addressRoutes');
+const cmsRoutes = require('./routes/cmsRoutes');
 
 const app = express();
 
@@ -149,6 +150,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/chapa', chapaRoutes);
+app.use('/api/cms', cmsRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/monitoring', require('./routes/monitoringRoutes'));
 

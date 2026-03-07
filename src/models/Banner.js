@@ -28,8 +28,16 @@ const Banner = sequelize.define('Banner', {
     defaultValue: true
   },
   position: {
-    type: DataTypes.ENUM('home_main', 'home_side', 'category_top'),
+    type: DataTypes.ENUM('home_main', 'home_side', 'home_sidebar', 'category_top', 'product_sidebar'),
     defaultValue: 'home_main'
+  },
+  start_date: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
+  },
+  end_date: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
   }
 }, {
   tableName: 'banners',

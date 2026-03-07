@@ -286,12 +286,25 @@ const getSellerDashboard = async (req, res, next) => {
       }
     });
 
-    // Get total sales (sum of all order items for this seller)
+    // Get total items sold and revenue (sum of all order items for this seller from PAID orders)
     const totalSalesResult = await OrderItem.findOne({
       where: { seller_id: seller.id },
+      include: [{
+        model: Order,
+        as: 'order',
+        required: true,
+        attributes: [], // Don't select any columns from Order
+        include: [{
+          model: Payment,
+          as: 'payment',
+          required: true,
+          attributes: [], // Don't select any columns from Payment
+          where: { status: { [Op.in]: ['success', 'verified'] } }
+        }]
+      }],
       attributes: [
-        [sequelize.fn('SUM', sequelize.col('price_at_purchase')), 'totalRevenue'],
-        [sequelize.fn('SUM', sequelize.col('quantity')), 'totalItemsSold']
+        [sequelize.fn('SUM', sequelize.col('OrderItem.price_at_purchase')), 'totalRevenue'],
+        [sequelize.fn('SUM', sequelize.col('OrderItem.quantity')), 'totalItemsSold']
       ],
       raw: true
     });
@@ -299,12 +312,29 @@ const getSellerDashboard = async (req, res, next) => {
     const totalRevenue = parseFloat(totalSalesResult?.totalRevenue || 0);
     const totalItemsSold = parseInt(totalSalesResult?.totalItemsSold || 0);
 
-    // Get total orders count (distinct orders)
-    const totalOrders = await OrderItem.count({
+    // Get total orders count (distinct PAID orders)
+    const totalOrdersResult = await OrderItem.findOne({
       where: { seller_id: seller.id },
-      distinct: true,
-      col: 'order_id'
+      include: [{
+        model: Order,
+        as: 'order',
+        required: true,
+        attributes: [],
+        include: [{
+          model: Payment,
+          as: 'payment',
+          required: true,
+          attributes: [],
+          where: { status: { [Op.in]: ['success', 'verified'] } }
+        }]
+      }],
+      attributes: [
+        [sequelize.fn('COUNT', sequelize.fn('DISTINCT', sequelize.col('OrderItem.order_id'))), 'count']
+      ],
+      raw: true
     });
+    
+    const totalOrders = parseInt(totalOrdersResult?.count || 0);
 
     // Get order items count by status
     const orderStatusCounts = await OrderItem.findAll({
@@ -329,50 +359,97 @@ const getSellerDashboard = async (req, res, next) => {
       statusSummary[item.status] = parseInt(item.count);
     });
 
-    // Get daily sales for the last 7 days
+    // Get daily sales for the last 7 days (PAID orders only)
     const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
 
     const dailySalesData = await OrderItem.findAll({
       where: {
         seller_id: seller.id,
         created_at: { [Op.gte]: sevenDaysAgo }
       },
+      include: [{
+        model: Order,
+        as: 'order',
+        required: true,
+        attributes: [], // Don't select Order columns to avoid GROUP BY issues
+        include: [{
+          model: Payment,
+          as: 'payment',
+          required: true,
+          attributes: [], // Don't select Payment columns
+          where: { status: { [Op.in]: ['success', 'verified'] } }
+        }]
+      }],
       attributes: [
-        [sequelize.fn('DATE', sequelize.col('created_at')), 'date'],
-        [sequelize.fn('SUM', sequelize.col('price_at_purchase')), 'amount'],
-        [sequelize.fn('COUNT', sequelize.literal('DISTINCT order_id')), 'orders']
+        [sequelize.fn('DATE', sequelize.col('OrderItem.created_at')), 'date'],
+        [sequelize.fn('SUM', sequelize.col('OrderItem.price_at_purchase')), 'amount'],
+        [sequelize.fn('COUNT', sequelize.fn('DISTINCT', sequelize.col('OrderItem.order_id'))), 'orders']
       ],
-      group: [sequelize.fn('DATE', sequelize.col('created_at'))],
-      order: [[sequelize.fn('DATE', sequelize.col('created_at')), 'ASC']],
+      group: [sequelize.fn('DATE', sequelize.col('OrderItem.created_at'))],
+      order: [[sequelize.fn('DATE', sequelize.col('OrderItem.created_at')), 'ASC']],
       raw: true
     });
 
-    // Format daily sales data
-    const dailySales = dailySalesData.map(item => ({
-      date: item.date,
-      amount: parseFloat(item.amount || 0),
-      orders: parseInt(item.orders || 0)
-    }));
+    // Fill in missing dates for the last 7 days
+    const dailySalesMap = new Map();
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(sevenDaysAgo);
+      d.setDate(d.getDate() + i);
+      const dateStr = d.toISOString().split('T')[0];
+      dailySalesMap.set(dateStr, { date: dateStr, amount: 0, orders: 0 });
+    }
+
+    dailySalesData.forEach(item => {
+      const dateStr = item.date;
+      if (dailySalesMap.has(dateStr)) {
+        dailySalesMap.set(dateStr, {
+          date: dateStr,
+          amount: parseFloat(item.amount || 0),
+          orders: parseInt(item.orders || 0)
+        });
+      }
+    });
+
+    const dailySales = Array.from(dailySalesMap.values());
 
     // Get recent orders (last 10 order items for this seller)
-    const recentOrders = await OrderItem.findAll({
+    const recentOrderItems = await OrderItem.findAll({
       where: { seller_id: seller.id },
       include: [
         {
           model: Order,
           as: 'order',
-          attributes: ['id', 'user_id', 'total_amount', 'order_status', 'created_at']
+          attributes: ['id', 'order_number', 'total_amount', 'order_status', 'created_at'],
+          include: [{
+            model: User,
+            as: 'user',
+            attributes: ['first_name', 'last_name']
+          }]
         },
         {
           model: Product,
           as: 'product',
-          attributes: ['id', 'name', 'price']
+          attributes: ['id', 'name', 'price', 'images']
         }
       ],
       order: [['created_at', 'DESC']],
       limit: 10
     });
+
+    const recentOrders = recentOrderItems.map(item => ({
+      id: item.id,
+      orderId: item.order_id,
+      orderNumber: item.order?.order_number,
+      productName: item.product?.name || 'Unknown Product',
+      productImage: (item.product?.images && item.product.images.length > 0) ? item.product.images[0] : null,
+      customerName: item.order?.user ? `${item.order.user.first_name} ${item.order.user.last_name}` : 'Unknown Customer',
+      amount: parseFloat(item.price_at_purchase),
+      quantity: item.quantity,
+      status: item.status,
+      date: item.created_at
+    }));
 
     res.status(200).json({
       success: true,

@@ -1310,12 +1310,12 @@ exports.getProductPerformance = async (req, res, next) => {
     const topSelling = await OrderItem.findAll({
       attributes: [
         ['product_id', 'productId'],
-        [sequelize.fn('SUM', sequelize.col('quantity')), 'unitsSold'],
-        [sequelize.fn('SUM', sequelize.literal('quantity * price_at_purchase')), 'revenue']
+        [sequelize.fn('SUM', sequelize.col('OrderItem.quantity')), 'unitsSold'],
+        [sequelize.fn('SUM', sequelize.literal('OrderItem.quantity * OrderItem.price_at_purchase')), 'revenue']
       ],
       include: [{ 
         model: Product, as: 'product', 
-        attributes: ['name', 'sku', 'stock', 'price', 'images'] 
+        attributes: ['name', 'sku', 'quantity', 'price', 'images'] 
       }],
       group: ['product_id'],
       order: [[sequelize.literal('unitsSold'), 'DESC']],
@@ -1325,20 +1325,18 @@ exports.getProductPerformance = async (req, res, next) => {
     // Low Stock Products
     const lowStock = await Product.findAll({
       where: {
-        stock: { [Op.lte]: 10 }, // Assuming 10 is low stock threshold
-        is_active: true
+        quantity: { [Op.lte]: 10 }, // Assuming 10 is low stock threshold
+        is_published: true
       },
-      attributes: ['id', 'name', 'sku', 'stock', 'price', 'images'],
-      order: [['stock', 'ASC']],
+      attributes: ['id', 'name', 'sku', 'quantity', 'price', 'images'],
+      order: [['quantity', 'ASC']],
       limit: parseInt(lowStockLimit)
     });
 
-    // Most Viewed Products (Using orders as a proxy if views not tracked, or just mock/query if tracked)
-    // For now, let's use revenue as a proxy or just the same as top selling for this demonstration,
-    // or if the model has a 'views' field, use that.
+    // Most Viewed Products
     const mostViewed = await Product.findAll({
-      attributes: ['id', 'name', 'sku', 'stock', 'price', 'images', [sequelize.literal('0'), 'views']], // Mocking views as 0
-      order: [['created_at', 'DESC']],
+      attributes: ['id', 'name', 'sku', 'quantity', 'price', 'images', 'views'],
+      order: [['views', 'DESC'], ['created_at', 'DESC']],
       limit: parseInt(mostViewedLimit)
     });
 
@@ -1352,14 +1350,14 @@ exports.getProductPerformance = async (req, res, next) => {
           image: item.product?.images && item.product.images.length > 0 ? item.product.images[0] : null,
           unitsSold: item.getDataValue('unitsSold'),
           revenue: item.getDataValue('revenue'),
-          stock: item.product?.stock
+          stock: item.product?.quantity
         })),
         lowStock: lowStock.map(p => ({
           id: p.id,
           name: p.name,
           sku: p.sku,
-          image: p.main_image,
-          stock: p.stock,
+          image: p.images && p.images.length > 0 ? p.images[0] : null,
+          stock: p.quantity,
           minStock: 10,
           price: p.price
         })),
@@ -1367,14 +1365,14 @@ exports.getProductPerformance = async (req, res, next) => {
           id: p.id,
           name: p.name,
           sku: p.sku,
-          image: p.main_image,
-          views: 0,
+          image: p.images && p.images.length > 0 ? p.images[0] : null,
+          views: p.views || 0,
           unitsSold: 0,
           revenue: 0
         })),
-        totalProducts: await Product.count({ where: { is_active: true } }),
-        lowStockCount: await Product.count({ where: { stock: { [Op.lte]: 10 }, is_active: true } }),
-        totalViews: 0
+        totalProducts: await Product.count({ where: { is_published: true } }),
+        lowStockCount: await Product.count({ where: { quantity: { [Op.lte]: 10 }, is_published: true } }),
+        totalViews: await Product.sum('views') || 0
       } 
     });
   } catch (error) {
@@ -1389,11 +1387,11 @@ exports.getSellerPerformance = async (req, res, next) => {
     const performance = await OrderItem.findAll({
       attributes: [
         ['seller_id', 'sellerId'],
-        [sequelize.fn('SUM', sequelize.col('quantity')), 'unitsSold'],
-        [sequelize.fn('SUM', sequelize.literal('quantity * price_at_purchase')), 'revenue'],
+        [sequelize.fn('SUM', sequelize.col('OrderItem.quantity')), 'unitsSold'],
+        [sequelize.fn('SUM', sequelize.literal('OrderItem.quantity * OrderItem.price_at_purchase')), 'revenue'],
         [sequelize.fn('COUNT', sequelize.fn('DISTINCT', sequelize.col('order_id'))), 'orderCount']
       ],
-      include: [{ model: Seller, as: 'seller', attributes: ['store_name', 'logo'] }],
+      include: [{ model: Seller, as: 'seller', attributes: ['store_name', 'store_logo'] }],
       group: ['seller_id'],
       order: [[sequelize.literal('revenue'), 'DESC']],
       limit: parseInt(limit)
@@ -1405,13 +1403,13 @@ exports.getSellerPerformance = async (req, res, next) => {
         sellers: performance.map(item => ({
           id: item.sellerId,
           storeName: item.seller?.store_name,
-          logo: item.seller?.logo,
+          logo: item.seller?.store_logo,
           unitsSold: item.getDataValue('unitsSold'),
           revenue: item.getDataValue('revenue'),
           orderCount: item.getDataValue('orderCount'),
-          rating: 4.5 // Mock rating
+          rating: item.seller?.rating || 0
         })),
-        totalSellers: await Seller.count({ where: { status: 'approved' } }),
+        totalSellers: await Seller.count({ where: { approval_status: 'approved' } }),
         topSeller: performance[0]?.seller?.store_name || 'N/A'
       } 
     });

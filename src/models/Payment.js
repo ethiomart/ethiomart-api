@@ -24,7 +24,7 @@ const Payment = sequelize.define('Payment', {
     unique: true
   },
   payment_method: {
-    type: DataTypes.ENUM('card', 'mobile_money', 'bank_transfer', 'cod'),
+    type: DataTypes.ENUM('card', 'mobile_money', 'bank_transfer', 'cod', 'unknown', 'other'),
     allowNull: true
   },
   amount: {

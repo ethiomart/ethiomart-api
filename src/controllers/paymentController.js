@@ -18,6 +18,129 @@ function formatResponse(success, message, data = null) {
 }
 
 /**
+ * Finalize a successful payment: Update order status, update seller analytics, and send confirmation email.
+ * This should be called within a database transaction.
+ * @param {Object} payment - The Payment model instance
+ * @param {Object} order - The Order model instance
+ * @param {Object} verificationResult - The result from Chapa verification
+ * @param {Object} transaction - Sequelize transaction object
+ */
+async function finalizePaymentSuccess(payment, order, verificationResult, transaction) {
+  const startTime = Date.now();
+  const reference = payment.chapa_tx_ref;
+
+  // 1. Update order status
+  if (order.payment_status !== 'paid') {
+    order.payment_status = 'paid';
+    order.order_status = 'confirmed';
+    order.paid_at = new Date();
+    order.payment_method = verificationResult.paymentMethod || payment.payment_method;
+    await order.save({ transaction });
+
+    // Log payment success
+    securityLogger.logPaymentSuccess({
+      paymentId: payment.id,
+      orderId: order.id,
+      reference,
+      amount: payment.amount,
+      currency: payment.currency,
+      paymentMethod: verificationResult.paymentMethod || payment.payment_method
+    });
+
+    // Log order confirmation
+    securityLogger.logOrderConfirmation({
+      orderId: order.id,
+      orderNumber: order.order_number,
+      paymentId: payment.id,
+      reference,
+      amount: payment.amount
+    });
+  }
+
+  // 2. Update seller analytics (Revenue and Order counts)
+  try {
+    // Get all order items for this order to find sellers and amounts
+    const orderItems = await OrderItem.findAll({ 
+      where: { order_id: order.id },
+      attributes: ['id', 'seller_id', 'price_at_purchase', 'quantity'],
+      transaction
+    });
+    
+    const sellerRevenue = {};
+    const sellerOrders = new Set();
+    
+    for (const item of orderItems) {
+      if (item.seller_id) {
+        const revenue = parseFloat(item.price_at_purchase) * item.quantity;
+        sellerRevenue[item.seller_id] = (sellerRevenue[item.seller_id] || 0) + revenue;
+        sellerOrders.add(item.seller_id);
+      }
+    }
+    
+    for (const sellerId of Object.keys(sellerRevenue)) {
+      const revenue = sellerRevenue[sellerId];
+      const seller = await Seller.findByPk(sellerId, { transaction });
+      if (seller) {
+        await seller.increment({
+          total_revenue: revenue,
+          total_orders: 1
+        }, { transaction });
+        console.log(`Payment Finalization: Updated seller ${sellerId} analytics: +${revenue.toFixed(2)} revenue, +1 order`);
+      }
+    }
+  } catch (analyticsError) {
+    console.error('Payment Finalization: Failed to update seller analytics:', analyticsError.message);
+  }
+
+  // 3. Send confirmation email (with retry queue)
+  try {
+    const emailService = require('../services/emailService');
+    const retryQueue = require('../utils/retryQueue');
+    const logger = require('../utils/logger');
+
+    const emailParams = {
+      email: order.user?.email,
+      firstName: order.user?.first_name,
+      lastName: order.user?.last_name,
+      orderId: order.id,
+      orderNumber: order.order_number,
+      amount: payment.amount,
+      currency: payment.currency,
+      paymentMethod: verificationResult.paymentMethod || payment.payment_method,
+      reference: reference
+    };
+
+    const emailResult = await emailService.sendPaymentConfirmation(emailParams);
+    
+    if (!emailResult.success) {
+      logger.logEmailFailure({
+        emailType: 'payment_confirmation',
+        recipient: order.user?.email,
+        error: emailResult.error,
+        orderId: order.id,
+        paymentId: payment.id
+      });
+
+      // Add to retry queue
+      retryQueue.addEmailToQueue(
+        async () => { await emailService.sendPaymentConfirmation(emailParams); },
+        { ...emailParams, emailType: 'payment_confirmation', paymentId: payment.id }
+      );
+    }
+  } catch (emailError) {
+    console.error('Payment Finalization: Failed to send confirmation email:', emailError.message);
+  }
+
+  // 4. Record Metrics
+  paymentMetrics.recordPaymentSuccess({
+    paymentId: payment.id,
+    orderId: payment.order_id,
+    amount: payment.amount,
+    paymentMethod: verificationResult.paymentMethod || payment.payment_method
+  });
+}
+
+/**
  * Initialize payment
  * POST /api/payments/initiate
  * Validation is handled by validatePaymentInitialization middleware
@@ -787,9 +910,6 @@ const verifyPayment = async (req, res) => {
 
     // Property 17: Status Validation in Verification
     if (verificationResult.status === 'success') {
-      // Property 28: No Confirmation Without Verification (already verified above)
-      // Property 21: Order Confirmation on Successful Verification
-      
       // Update payment status
       payment.status = 'success';
       payment.payment_method = verificationResult.paymentMethod;
@@ -798,113 +918,8 @@ const verifyPayment = async (req, res) => {
       payment.paid_at = new Date();
       await payment.save({ transaction });
 
-      // Property 23: Order Status Update on Confirmation
-      const order = payment.order;
-      if (order.payment_status !== 'paid') {
-        order.payment_status = 'paid';
-        order.order_status = 'confirmed';
-        order.paid_at = new Date();
-        
-        // Property 24: Chapa Reference Storage
-        order.payment_method = verificationResult.paymentMethod;
-        await order.save({ transaction });
-
-        // Log payment success
-        securityLogger.logPaymentSuccess({
-          paymentId: payment.id,
-          orderId: order.id,
-          reference,
-          amount: payment.amount,
-          currency: payment.currency,
-          paymentMethod: verificationResult.paymentMethod
-        });
-
-        // Log order confirmation
-        securityLogger.logOrderConfirmation({
-          orderId: order.id,
-          orderNumber: order.order_number,
-          paymentId: payment.id,
-          reference,
-          amount: payment.amount
-        });
-
-        // Property 25: Confirmation Email Sending
-        // Property 26: Success Response on Confirmation
-        // Task 16.1.3: Implement graceful degradation for email failures
-        // Task 16.1.4: Add retry queue for failed operations
-        try {
-          const emailService = require('../services/emailService');
-          const emailResult = await emailService.sendPaymentConfirmation({
-            email: order.user?.email,
-            firstName: order.user?.first_name,
-            lastName: order.user?.last_name,
-            orderId: order.id,
-            orderNumber: order.order_number,
-            amount: payment.amount,
-            currency: payment.currency,
-            paymentMethod: verificationResult.paymentMethod,
-            reference: reference
-          });
-          
-          // Log email result but don't fail payment
-          if (!emailResult.success) {
-            const logger = require('../utils/logger');
-            logger.logEmailFailure({
-              emailType: 'payment_confirmation',
-              recipient: order.user?.email,
-              error: emailResult.error,
-              orderId: order.id,
-              paymentId: payment.id
-            });
-          }
-        } catch (emailError) {
-          // Property 27: Confirmation Failure Handling
-          // Task 16.1.3: Graceful degradation - log error but don't fail payment
-          // Task 16.1.4: Add to retry queue
-          const logger = require('../utils/logger');
-          const retryQueue = require('../utils/retryQueue');
-          
-          logger.logEmailFailure({
-            emailType: 'payment_confirmation',
-            recipient: order.user?.email,
-            error: emailError.message,
-            orderId: order.id,
-            paymentId: payment.id
-          });
-          
-          console.error('Failed to send confirmation email:', emailError.message);
-          
-          // Add to retry queue
-          const emailService = require('../services/emailService');
-          retryQueue.addEmailToQueue(
-            async () => {
-              await emailService.sendPaymentConfirmation({
-                email: order.user?.email,
-                firstName: order.user?.first_name,
-                lastName: order.user?.last_name,
-                orderId: order.id,
-                orderNumber: order.order_number,
-                amount: payment.amount,
-                currency: payment.currency,
-                paymentMethod: verificationResult.paymentMethod,
-                reference: reference
-              });
-            },
-            {
-              emailType: 'payment_confirmation',
-              recipient: order.user?.email,
-              orderId: order.id,
-              paymentId: payment.id,
-              reference: reference
-            }
-          );
-          
-          // Don't fail the payment, just log the error
-          // Mark for manual review if needed
-          order.admin_notes = (order.admin_notes || '') + `\nConfirmation email failed: ${emailError.message}`;
-          await order.save({ transaction });
-        }
-      }
+      // Finalize order status, analytics, and emails in a unified way
+      await finalizePaymentSuccess(payment, payment.order, verificationResult, transaction);
 
       await transaction.commit();
 
@@ -1231,34 +1246,8 @@ const adminVerifyPayment = async (req, res) => {
       payment.paid_at = new Date();
       await payment.save({ transaction });
 
-      const order = payment.order;
-      if (order.payment_status !== 'paid') {
-        order.payment_status = 'paid';
-        order.order_status = 'confirmed';
-        order.paid_at = new Date();
-        order.payment_method = verificationResult.paymentMethod;
-        await order.save({ transaction });
-
-        // Send confirmation email
-        try {
-          const emailService = require('../services/emailService');
-          await emailService.sendPaymentConfirmation({
-            email: order.user?.email,
-            firstName: order.user?.first_name,
-            lastName: order.user?.last_name,
-            orderId: order.id,
-            orderNumber: order.order_number,
-            amount: payment.amount,
-            currency: payment.currency,
-            paymentMethod: verificationResult.paymentMethod,
-            reference: reference
-          });
-        } catch (emailError) {
-          console.error('Failed to send confirmation email (admin verification):', emailError.message);
-          order.admin_notes = (order.admin_notes || '') + `\nConfirmation email failed (admin verification): ${emailError.message}`;
-          await order.save({ transaction });
-        }
-      }
+      // Finalize order status, analytics, and emails in a unified way
+      await finalizePaymentSuccess(payment, payment.order, verificationResult, transaction);
 
       await transaction.commit();
 
@@ -1508,138 +1497,11 @@ const handleCallback = async (req, res) => {
           payment.paid_at = new Date();
           await payment.save({ transaction });
 
-          // Task 7.7: Update order status if payment succeeded
-          const order = payment.order;
-          if (order && order.payment_status !== 'paid') {
-            order.payment_status = 'paid';
-            order.order_status = 'confirmed';
-            order.paid_at = new Date();
-            order.payment_method = verificationResult.paymentMethod;
-            await order.save({ transaction });
+          // Finalize order status, analytics, and emails in a unified way
+          await finalizePaymentSuccess(payment, payment.order, verificationResult, transaction);
 
-            // Commit transaction before sending emails and updating analytics
-            // This ensures payment and order status are persisted even if email/analytics fail
-            await transaction.commit();
-
-            // Log payment success
-            securityLogger.logPaymentSuccess({
-              paymentId: payment.id,
-              orderId: order.id,
-              reference: tx_ref,
-              amount: payment.amount,
-              currency: payment.currency,
-              paymentMethod: verificationResult.paymentMethod
-            });
-
-            // Log order confirmation
-            securityLogger.logOrderConfirmation({
-              orderId: order.id,
-              orderNumber: order.order_number,
-              paymentId: payment.id,
-              reference: tx_ref,
-              amount: payment.amount
-            });
-
-            // Task 7.10: Send confirmation email to customer after successful payment
-            try {
-              const emailService = require('../services/emailService');
-              const emailResult = await emailService.sendPaymentConfirmation({
-                email: order.user?.email,
-                firstName: order.user?.first_name,
-                lastName: order.user?.last_name,
-                orderId: order.id,
-                orderNumber: order.order_number,
-                amount: payment.amount,
-                currency: payment.currency,
-                paymentMethod: verificationResult.paymentMethod,
-                reference: tx_ref
-              });
-
-              if (!emailResult.success) {
-                const logger = require('../utils/logger');
-                logger.logEmailFailure({
-                  emailType: 'payment_confirmation',
-                  recipient: order.user?.email,
-                  error: emailResult.error,
-                  orderId: order.id,
-                  paymentId: payment.id
-                });
-              }
-            } catch (emailError) {
-              const logger = require('../utils/logger');
-              logger.logEmailFailure({
-                emailType: 'payment_confirmation',
-                recipient: order.user?.email,
-                error: emailError.message,
-                orderId: order.id,
-                paymentId: payment.id
-              });
-              
-              console.error('Callback processing: Failed to send confirmation email:', emailError.message);
-            }
-
-            // Task 14.4: Update seller analytics with revenue and order count
-            try {
-              const OrderItem = require('../models').OrderItem;
-              const Seller = require('../models').Seller;
-              
-              // Get all order items for this order
-              const orderItems = await OrderItem.findAll({ 
-                where: { order_id: order.id },
-                attributes: ['id', 'seller_id', 'price_at_purchase', 'quantity']
-              });
-              
-              console.log(`Callback processing: Updating analytics for ${orderItems.length} order items`);
-              
-              // Group items by seller to update each seller once per order
-              const sellerRevenue = {};
-              const sellerOrders = new Set();
-              
-              for (const item of orderItems) {
-                if (item.seller_id) {
-                  const revenue = parseFloat(item.price_at_purchase) * item.quantity;
-                  
-                  // Accumulate revenue per seller
-                  if (!sellerRevenue[item.seller_id]) {
-                    sellerRevenue[item.seller_id] = 0;
-                  }
-                  sellerRevenue[item.seller_id] += revenue;
-                  
-                  // Track unique sellers for order count
-                  sellerOrders.add(item.seller_id);
-                }
-              }
-              
-              // Update each seller's analytics
-              for (const sellerId of Object.keys(sellerRevenue)) {
-                const revenue = sellerRevenue[sellerId];
-                
-                const seller = await Seller.findByPk(sellerId);
-                if (seller) {
-                  // Increment total_revenue and total_orders
-                  await seller.increment({
-                    total_revenue: revenue,
-                    total_orders: 1
-                  });
-                  
-                  console.log(`Callback processing: Updated seller ${sellerId} analytics: +${revenue.toFixed(2)} revenue, +1 order`);
-                } else {
-                  console.warn(`Callback processing: Seller ${sellerId} not found for analytics update`);
-                }
-              }
-              
-              console.log(`Callback processing: Successfully updated analytics for ${sellerOrders.size} sellers`);
-            } catch (analyticsError) {
-              console.error('Callback processing: Failed to update seller analytics:', analyticsError.message);
-              console.error(analyticsError.stack);
-            }
-
-            console.log(`Callback processing: Payment verified and order ${order.id} confirmed for tx_ref ${tx_ref}`);
-          } else {
-            // Order already paid, commit transaction and return
-            await transaction.commit();
-            console.log(`Callback processing: Payment verified but order ${order.id} already paid for tx_ref ${tx_ref}`);
-          }
+          await transaction.commit();
+          console.log(`Callback processing: Payment verified and order ${payment.order_id} confirmed for tx_ref ${tx_ref}`);
         } else if (verificationResult.status === 'failed') {
           // Task 7.6: Update payment record with failure
           payment.status = 'failed';

@@ -288,7 +288,7 @@ const createOrder = async (req, res, next) => {
     // ============================================
     const order = await Order.create(
       {
-        userId,
+        user_id: userId,
         order_number: orderNumber,
         subtotal: calculatedSubtotal,
         shipping_cost: validatedShippingCost,
@@ -909,7 +909,7 @@ const getOrderById = async (req, res, next) => {
     // Authorization check
     if (userRole === 'customer') {
       // Customers can only view their own orders
-      if (order.userId !== userId) {
+      if (order.user_id !== userId) {
         return res.status(403).json({
           success: false,
           message: 'Access denied'
@@ -1037,7 +1037,7 @@ const updateOrderStatus = async (req, res, next) => {
         });
       }
 
-      await order.update({ status });
+      await order.update({ order_status: status });
 
       res.status(200).json({
         success: true,
@@ -1085,7 +1085,7 @@ const cancelOrder = async (req, res, next) => {
     }
 
     // Authorization check - only order owner or admin can cancel
-    if (userRole !== 'admin' && order.userId !== userId) {
+    if (userRole !== 'admin' && order.user_id !== userId) {
       await transaction.rollback();
       return res.status(403).json({
         success: false,
@@ -1095,36 +1095,39 @@ const cancelOrder = async (req, res, next) => {
 
     // Check if order can be cancelled
     const nonCancellableStatuses = ['shipped', 'delivered', 'cancelled'];
-    if (nonCancellableStatuses.includes(order.status)) {
+    if (nonCancellableStatuses.includes(order.order_status)) {
       await transaction.rollback();
       return res.status(400).json({
         success: false,
-        message: `Cannot cancel order with status: ${order.status}`
+        message: `Cannot cancel order with status: ${order.order_status}`
       });
     }
 
     // Update order status to cancelled
-    await order.update({ status: 'cancelled' }, { transaction });
+    await order.update({ order_status: 'cancelled' }, { transaction });
 
     // Update all order items to cancelled
     await OrderItem.update(
       { status: 'cancelled' },
       {
-        where: { orderId: id },
+        where: { order_id: id },
         transaction
       }
     );
 
     // Restore product stock
     for (const item of order.items) {
-      await Product.increment(
-        'quantity',
-        {
-          by: item.quantity,
-          where: { id: item.productId },
-          transaction
-        }
-      );
+      const product = await Product.findByPk(item.productId);
+      if (product) {
+        await Product.increment(
+          'quantity',
+          {
+            by: item.quantity,
+            where: { id: item.productId },
+            transaction
+          }
+        );
+      }
     }
 
     await transaction.commit();
